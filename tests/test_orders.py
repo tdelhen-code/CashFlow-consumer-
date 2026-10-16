@@ -128,6 +128,15 @@ class OrderTests(unittest.TestCase):
     def test_cancel_refunds_once(self):
         o = self.order()
         O.assign_supplier(self.db, o["id"], self.supplier, admin_id=self.admin)
+        with self.assertRaises(L.LedgerError):     # still with the supplier
+            O.cancel_order(self.db, o["id"], admin_id=self.admin, reason="offline")
+        with self.assertRaises(L.LedgerError):     # a reason is required
+            O.unassign_supplier(self.db, o["id"], admin_id=self.admin, reason=" ")
+        O.unassign_supplier(self.db, o["id"], admin_id=self.admin,
+                            reason="supplier confirmed not paid")
+        unassigned = O.find_by_receipt(self.db, o["receipt_code"])
+        self.assertEqual((unassigned["status"], unassigned["supplier_id"],
+                          unassigned["supplier_cost"]), ("placed", None, None))
         O.cancel_order(self.db, o["id"], admin_id=self.admin, reason="supplier offline")
         self.assertEqual(L.balance(self.db, self.ali), lyd("1000"))
         self.assertEqual(O.find_by_receipt(self.db, o["receipt_code"])["status"],

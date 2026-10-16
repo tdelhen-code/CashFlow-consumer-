@@ -22,6 +22,15 @@ Other rules:
   Keys are scoped to the person sending them and the kind of action, and a key
   reused with different details is refused instead of answered with the old result.
 - Any single amount is at most MAX_DIRHAMS (1 billion LYD).
+
+Users:
+- Phone numbers are Libyan mobiles stored as +2189XXXXXXXX, whatever way they
+  were typed. A WhatsApp number, if different, can be from any country.
+- Deactivate = the worker has left. Only allowed at a zero balance with no open
+  orders.
+- Block = freeze while a problem or doubt is looked into. A blocked worker can't
+  send, receive, order or take cash, but salary and admin deposits still come in.
+  Blocked admins lose admin rights. Both need a reason and are logged.
 """
 import json
 import re
@@ -35,6 +44,7 @@ MAX_DIRHAMS = 10**12
 SYSTEM_ACCOUNTS = ("SYS_ORDERS", "SYS_FEES", "SYS_MARGIN", "SYS_CAPITAL")
 ROLES = ("customer", "admin")
 LANGUAGES = ("ar", "en", "fr")
+MOBILE_PREFIXES = ("91", "92", "93", "94", "95")   # Libyan mobile networks
 
 
 class LedgerError(Exception):
@@ -61,6 +71,10 @@ class PermissionDenied(LedgerError):
     pass
 
 
+class AccountBlocked(LedgerError):
+    """The worker is blocked by an admin; their money is frozen."""
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
@@ -68,8 +82,12 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   phone TEXT NOT NULL UNIQUE,
   language TEXT NOT NULL DEFAULT 'ar' CHECK (language IN ('ar','en','fr')),
+  whatsapp TEXT,                      -- international format, only if not the phone
   password_hash TEXT,
   active INTEGER NOT NULL DEFAULT 1,
+  blocked INTEGER NOT NULL DEFAULT 0,
+  blocked_reason TEXT,
+  blocked_at TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -156,6 +174,44 @@ def parse_lyd(text):
     if dirhams != dirhams.to_integral_value():
         raise InvalidAmount("at most 3 decimal places")
     return int(dirhams)
+
+
+def normalize_phone(text):
+    """Any usual way of writing a Libyan mobile -> '+2189XXXXXXXX'.
+    Accepts 091-1234567, 0911234567, 911234567, +218 91 123 4567, 00218..."""
+    digits = re.sub(r"[\s\-().]", "", str(text or ""))
+    if digits.startswith("+"):
+        digits = digits[1:]
+    elif digits.startswith("00"):
+        digits = digits[2:]
+    if not digits.isdigit():
+        raise LedgerError("phone number: digits only")
+    if digits.startswith("218"):
+        digits = digits[3:]
+    if digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) != 9 or digits[:2] not in MOBILE_PREFIXES:
+        raise LedgerError("phone number must be a Libyan mobile, e.g. 091 234 5678")
+    return "+218" + digits
+
+
+def normalize_whatsapp(text):
+    """WhatsApp number from any country -> '+<country><number>'. A number written
+    the local way (starting with a single 0) is taken as Libyan."""
+    raw = re.sub(r"[\s\-().]", "", str(text or ""))
+    if raw.startswith("+"):
+        digits = raw[1:]
+    elif raw.startswith("00"):
+        digits = raw[2:]
+    elif raw.startswith("0"):
+        return normalize_phone(raw)
+    else:
+        raise LedgerError("WhatsApp number: start with + and the country code")
+    if not digits.isdigit() or not 8 <= len(digits) <= 15 or digits[0] == "0":
+        raise LedgerError("WhatsApp number: + then country code and number")
+    if digits.startswith("218"):
+        return normalize_phone(digits)
+    return "+" + digits
 
 
 def format_lyd(dirhams):
@@ -245,6 +301,14 @@ def _customer_account(conn, user_id):
     return row["id"]
 
 
+def _usable_account(conn, user_id):
+    """Account of a worker who may move money themselves (not blocked)."""
+    acc = _customer_account(conn, user_id)
+    if conn.execute("SELECT blocked FROM users WHERE id = ?", (user_id,)).fetchone()[0]:
+        raise AccountBlocked(f"user {user_id} is blocked")
+    return acc
+
+
 def _holding(conn, code):
     row = conn.execute(
         "SELECT id FROM accounts WHERE code = ? AND kind = 'holding'", (code,)).fetchone()
@@ -259,7 +323,8 @@ def _system(conn, code):
 
 def _require_admin(conn, admin_id):
     row = conn.execute(
-        "SELECT 1 FROM users WHERE id = ? AND role = 'admin' AND active = 1",
+        "SELECT 1 FROM users WHERE id = ? AND role = 'admin' AND active = 1 "
+        "AND blocked = 0",
         (admin_id,)).fetchone()
     if not row:
         raise PermissionDenied("admin only")
@@ -299,8 +364,13 @@ def _post(conn, kind, entries, created_by, note=None, reference=None,
 # ---------- users, tills ----------
 
 def create_user(conn, role, name, phone, language="ar", password_hash=None, *,
-                admin_id=None):
-    """Only an admin can create users. The very first admin is created without one."""
+                admin_id=None, whatsapp=None):
+    """Only an admin can create users. The very first admin is created without one.
+    `whatsapp` is only needed when it differs from the phone number."""
+    phone = normalize_phone(phone)
+    whatsapp = None if whatsapp is None else normalize_whatsapp(whatsapp)
+    if whatsapp == phone:
+        whatsapp = None
     if role not in ROLES:
         raise LedgerError(f"role must be one of {', '.join(ROLES)}")
     if language not in LANGUAGES:
@@ -312,9 +382,11 @@ def create_user(conn, role, name, phone, language="ar", password_hash=None, *,
                 raise PermissionDenied("an admin must create this user")
         else:
             _require_admin(conn, admin_id)
+        if conn.execute("SELECT 1 FROM users WHERE phone = ?", (phone,)).fetchone():
+            raise LedgerError(f"{phone} is already registered")
         cur = conn.execute(
-            "INSERT INTO users(role, name, phone, language, password_hash) "
-            "VALUES (?,?,?,?,?)", (role, name, phone, language, password_hash))
+            "INSERT INTO users(role, name, phone, whatsapp, language, password_hash) "
+            "VALUES (?,?,?,?,?,?)", (role, name, phone, whatsapp, language, password_hash))
         user_id = cur.lastrowid
         if role == "customer":
             conn.execute(
@@ -322,6 +394,103 @@ def create_user(conn, role, name, phone, language="ar", password_hash=None, *,
                 (f"CUS_{user_id}", user_id))
         _log(conn, admin_id or user_id, "create_user", user_id, role=role, phone=phone)
     return user_id
+
+
+def find_user_by_phone(conn, phone):
+    """Look a user up by phone however it is typed. None if not registered."""
+    row = conn.execute(
+        "SELECT id, role, name, phone, whatsapp, language, active, blocked, "
+        "blocked_reason, blocked_at FROM users WHERE phone = ?",
+        (normalize_phone(phone),)).fetchone()
+    return dict(row) if row else None
+
+
+def set_whatsapp(conn, user_id, whatsapp, *, admin_id):
+    """Set or clear (None) a user's WhatsApp number."""
+    number = None if whatsapp is None else normalize_whatsapp(whatsapp)
+    with _write(conn):
+        _require_admin(conn, admin_id)
+        user = _user(conn, user_id)
+        if number == user["phone"]:
+            number = None
+        conn.execute("UPDATE users SET whatsapp = ? WHERE id = ?", (number, user_id))
+        _log(conn, admin_id, "set_whatsapp", user_id, whatsapp=number)
+
+
+def _user(conn, user_id):
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        raise UnknownAccount(f"no user {user_id}")
+    return row
+
+
+def _reason(reason):
+    reason = (reason or "").strip()
+    if not reason:
+        raise LedgerError("a reason is required")
+    return reason
+
+
+def block_user(conn, user_id, *, admin_id, reason):
+    """Freeze a user while a problem or suspicion is checked. Their balance stays
+    as it is; they can't send, receive, order or take cash until unblocked."""
+    reason = _reason(reason)
+    if user_id == admin_id:
+        raise LedgerError("you cannot block yourself")
+    with _write(conn):
+        _require_admin(conn, admin_id)
+        if _user(conn, user_id)["blocked"]:
+            raise LedgerError("user is already blocked")
+        conn.execute(
+            "UPDATE users SET blocked = 1, blocked_reason = ?, "
+            "blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+            (reason, user_id))
+        _log(conn, admin_id, "block_user", user_id, reason=reason)
+
+
+def unblock_user(conn, user_id, *, admin_id, reason):
+    reason = _reason(reason)
+    with _write(conn):
+        _require_admin(conn, admin_id)
+        if not _user(conn, user_id)["blocked"]:
+            raise LedgerError("user is not blocked")
+        conn.execute("UPDATE users SET blocked = 0, blocked_reason = NULL, "
+                     "blocked_at = NULL WHERE id = ?", (user_id,))
+        _log(conn, admin_id, "unblock_user", user_id, reason=reason)
+
+
+def deactivate_user(conn, user_id, *, admin_id, reason):
+    """The user has left. Only at a zero balance and with no unfinished orders,
+    so no money is left behind on a closed account."""
+    reason = _reason(reason)
+    if user_id == admin_id:
+        raise LedgerError("you cannot deactivate yourself")
+    with _write(conn):
+        _require_admin(conn, admin_id)
+        if not _user(conn, user_id)["active"]:
+            raise LedgerError("user is already inactive")
+        left = balance(conn, user_id)
+        if left:
+            raise LedgerError(f"balance is {format_lyd(left)} LYD; pay it out first")
+        has_orders = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'orders'"
+        ).fetchone()
+        if has_orders and conn.execute(
+                "SELECT 1 FROM orders WHERE customer_id = ? "
+                "AND status IN ('placed','assigned')", (user_id,)).fetchone():
+            raise LedgerError("user has unfinished orders")
+        conn.execute("UPDATE users SET active = 0 WHERE id = ?", (user_id,))
+        _log(conn, admin_id, "deactivate_user", user_id, reason=reason)
+
+
+def reactivate_user(conn, user_id, *, admin_id, reason):
+    reason = _reason(reason)
+    with _write(conn):
+        _require_admin(conn, admin_id)
+        if _user(conn, user_id)["active"]:
+            raise LedgerError("user is already active")
+        conn.execute("UPDATE users SET active = 1 WHERE id = ?", (user_id,))
+        _log(conn, admin_id, "reactivate_user", user_id, reason=reason)
 
 
 def add_till(conn, name, *, admin_id):
@@ -414,8 +583,8 @@ def transfer(conn, from_user, to_user, amount, *, fee=0, created_by=None,
                            to_user=to_user, amount=amount, fee=fee)
         if idem.existing:
             return idem.existing
-        src = _customer_account(conn, from_user)
-        dst = _customer_account(conn, to_user)
+        src = _usable_account(conn, from_user)
+        dst = _usable_account(conn, to_user)
         entries = [(src, -(amount + fee)), (dst, amount)]
         if fee:
             entries.append((_system(conn, "SYS_FEES"), fee))
@@ -446,7 +615,7 @@ def move_money(conn, from_code, to_code, amount, *, admin_id, note=None,
 def _charge_order(conn, user_id, amount, *, order_ref, idempotency_key=None):
     """Used by orders.place_order inside its own database transaction."""
     _check_amount(amount)
-    acc = _customer_account(conn, user_id)
+    acc = _usable_account(conn, user_id)
     idem = _idempotent(conn, idempotency_key, user_id, "order", amount=amount)
     if idem.existing:
         raise LedgerError("this order was already charged")
@@ -470,7 +639,7 @@ def withdraw_cash(conn, user_id, gross, fee, *, admin_id, from_till,
                            gross=gross, fee=fee, from_till=from_till)
         if idem.existing:
             return idem.existing
-        acc = _customer_account(conn, user_id)
+        acc = _usable_account(conn, user_id)
         entries = [(acc, -gross), (_holding(conn, from_till), gross - fee)]
         if fee:
             entries.append((_system(conn, "SYS_FEES"), fee))

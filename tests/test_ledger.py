@@ -44,7 +44,7 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(L.InvalidAmount):
             L.commission(1000, 1.5)
         with self.assertRaises(L.LedgerError):
-            L.create_user(self.db, "customer", "X", "0966666666", "de",
+            L.create_user(self.db, "customer", "X", "0956666666", "de",
                           admin_id=self.admin)
 
     def test_commission_rounding_and_minimum(self):

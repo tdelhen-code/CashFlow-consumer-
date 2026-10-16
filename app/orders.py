@@ -4,6 +4,8 @@ Flow: admin sets a price -> worker gets a quote, locked for 10 minutes -> worker
 places the order with the beneficiary's name and ID -> the LYD leaves the balance
 at once and a receipt code is issued -> admin assigns a supplier -> admin marks it
 paid with the supplier's confirmation reference. Paid and cancelled orders are final.
+An order with a supplier can't be cancelled directly: first unassign it (after
+checking with the supplier that they have not paid), then cancel.
 
 Money: placing an order moves its cost from the worker to SYS_ORDERS. Assigning a
 supplier locks the supplier's agreed rate onto the order (supplier_cost). Marking
@@ -263,7 +265,7 @@ def get_quote(conn, customer_id, currency, foreign_amount, *, now=None):
     amount = _decimal(foreign_amount, 2, "amount")
     now = _now(now)
     with L._write(conn):
-        L._customer_account(conn, customer_id)
+        L._usable_account(conn, customer_id)
         _active_currency(conn, currency)
         price = current_price(conn, currency)
         if not price:
@@ -447,12 +449,32 @@ def margin_report(conn, since=None, until=None):
     return rows
 
 
-def cancel_order(conn, order_id, *, admin_id, reason, now=None):
-    """Cancel an unpaid order and return the LYD to the worker's balance."""
+def unassign_supplier(conn, order_id, *, admin_id, reason, now=None):
+    """Take an unpaid order back from its supplier. Only after confirming with
+    them that they have not paid it out; the reason is logged."""
+    reason = L._reason(reason)
     with L._write(conn):
         L._require_admin(conn, admin_id)
         o = _get_order(conn, order_id)
-        if o["status"] not in ("placed", "assigned"):
+        if o["status"] != "assigned":
+            raise L.LedgerError(f"order is {o['status']}, not with a supplier")
+        conn.execute(
+            "UPDATE orders SET status = 'placed', supplier_id = NULL, supplier_rate = NULL, "
+            "supplier_cost = NULL, assigned_at = NULL WHERE id = ?", (order_id,))
+        L._log(conn, admin_id, "unassign_supplier", order_id,
+               supplier_id=o["supplier_id"], reason=reason)
+
+
+def cancel_order(conn, order_id, *, admin_id, reason, now=None):
+    """Cancel an order no supplier has yet and return the LYD to the worker.
+    For an order with a supplier, unassign_supplier first."""
+    with L._write(conn):
+        L._require_admin(conn, admin_id)
+        o = _get_order(conn, order_id)
+        if o["status"] == "assigned":
+            raise L.LedgerError("order is with a supplier: check they have not paid, "
+                                "unassign it, then cancel")
+        if o["status"] != "placed":
             raise L.LedgerError(f"order is {o['status']}")
         rev = L._reverse(conn, o["charge_txn_id"], admin_id, reason)
         conn.execute(

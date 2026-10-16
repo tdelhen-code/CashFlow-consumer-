@@ -19,6 +19,19 @@ other, and order foreign currency paid from their balance.
   - `supplier_balance`, `supplier_statement` and `margin_report` (per currency and
     supplier, for a time window) for the admin side.
 
+Users (in `app/ledger.py`):
+- phone numbers must be Libyan mobiles and are stored as `+2189XXXXXXXX` however
+  they are typed (`find_user_by_phone`); an optional WhatsApp number can be from
+  any country (`set_whatsapp`);
+- `block_user` / `unblock_user` freeze a worker while a problem or suspicion is
+  checked: no sending, receiving, orders or cash, but salary and deposits still
+  arrive; a blocked admin loses admin rights;
+- `deactivate_user` / `reactivate_user` for workers who leave: only at a zero
+  balance with no unfinished orders.
+
+An order with a supplier can't be cancelled directly: `unassign_supplier` first
+(after checking with the supplier that it wasn't paid), then `cancel_order`.
+
 Needs Python 3.10+ only (standard library). Run the tests from this folder:
 
     python3 -m unittest
