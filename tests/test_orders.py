@@ -28,6 +28,8 @@ class OrderTests(unittest.TestCase):
         O.set_price(self.db, "USD", "7.85", admin_id=self.admin, now=T0)
         O.set_price(self.db, "EGP", "0.1534", admin_id=self.admin, now=T0)
         self.supplier = O.add_supplier(self.db, "Cairo agent", "EG", admin_id=self.admin)
+        O.set_supplier_price(self.db, self.supplier, "USD", "7.80", admin_id=self.admin)
+        O.set_supplier_price(self.db, self.supplier, "EGP", "0.15", admin_id=self.admin)
 
     def order(self, amount="100", currency="USD", who=None, at=T0):
         who = who or self.ali

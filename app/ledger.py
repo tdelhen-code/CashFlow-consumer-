@@ -5,9 +5,12 @@ Sign convention (every transaction's entries add up to zero):
 - Holding accounts (BANK and each TILL_*): where real money sits, stored negative.
   -1000 means 1000 dirhams is physically there. Never above zero, so the books
   can't pay out money the bank or a till doesn't have.
+- Supplier accounts (SUP_<id>): positive = what the app owes that supplier for
+  orders they paid out. Negative = the supplier holds a prepayment from us.
 - System accounts:
-    SYS_ORDERS   LYD collected for currency orders, waiting for supplier settlement
+    SYS_ORDERS   LYD collected for currency orders not paid out yet
     SYS_FEES     commission earned
+    SYS_MARGIN   difference between what workers paid and what suppliers charge
     SYS_CAPITAL  owner money put in (positive) or taken out (negative)
 
 Other rules:
@@ -29,7 +32,7 @@ from decimal import Decimal, DecimalException
 
 DIRHAMS_PER_LYD = 1000
 MAX_DIRHAMS = 10**12
-SYSTEM_ACCOUNTS = ("SYS_ORDERS", "SYS_FEES", "SYS_CAPITAL")
+SYSTEM_ACCOUNTS = ("SYS_ORDERS", "SYS_FEES", "SYS_MARGIN", "SYS_CAPITAL")
 ROLES = ("customer", "admin")
 LANGUAGES = ("ar", "en", "fr")
 
@@ -72,7 +75,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('customer','holding','system')),
+  kind TEXT NOT NULL CHECK (kind IN ('customer','holding','system','supplier')),
   code TEXT NOT NULL UNIQUE,
   user_id INTEGER UNIQUE REFERENCES users(id),
   CHECK ((kind = 'customer') = (user_id IS NOT NULL))
@@ -81,7 +84,8 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS transactions (
   id INTEGER PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN ('deposit','payroll','transfer','order',
-                                     'withdrawal','move','capital','reversal')),
+                                     'withdrawal','move','capital','reversal',
+                                     'payout','settlement')),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   created_by INTEGER REFERENCES users(id),
   note TEXT,
@@ -509,8 +513,11 @@ def reverse(conn, txn_id, *, admin_id, reason, idempotency_key=None):
         idem = _idempotent(conn, idempotency_key, admin_id, "reversal", txn_id=txn_id)
         if idem.existing:
             return idem.existing
-        if _txn_kind(conn, txn_id) == "order":
+        kind = _txn_kind(conn, txn_id)
+        if kind == "order":
             raise LedgerError("cancel the order instead, so its status stays correct")
+        if kind == "payout":
+            raise LedgerError("a paid order is final")
         txn = _reverse(conn, txn_id, admin_id, reason, idem)
         _log(conn, admin_id, "reverse", txn, reverses=txn_id, reason=reason)
         return txn
@@ -545,7 +552,18 @@ def owed_to_customers(conn):
 
 
 def statement(conn, user_id, limit=50):
-    acc = _customer_account(conn, user_id)
+    return _statement(conn, _customer_account(conn, user_id), limit)
+
+
+def account_statement(conn, code, limit=50):
+    """Statement for any account by code, e.g. BANK, TILL_MAIN, SUP_3, SYS_MARGIN."""
+    row = conn.execute("SELECT id FROM accounts WHERE code = ?", (code,)).fetchone()
+    if not row:
+        raise UnknownAccount(f"no account called {code}")
+    return _statement(conn, row["id"], limit)
+
+
+def _statement(conn, acc, limit):
     rows = conn.execute(
         "SELECT * FROM ("
         " SELECT e.id AS entry_id, t.id AS txn_id, t.kind, t.created_at, e.amount,"
