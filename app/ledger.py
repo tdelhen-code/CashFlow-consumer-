@@ -424,6 +424,14 @@ def _user(conn, user_id):
     return row
 
 
+def _end_sessions(conn, user_id):
+    """Log the user out everywhere (when the login tables exist)."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'sessions'").fetchone():
+        conn.execute("UPDATE sessions SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                     "WHERE user_id = ? AND ended_at IS NULL", (user_id,))
+
+
 def _reason(reason):
     reason = (reason or "").strip()
     if not reason:
@@ -445,6 +453,7 @@ def block_user(conn, user_id, *, admin_id, reason):
             "UPDATE users SET blocked = 1, blocked_reason = ?, "
             "blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
             (reason, user_id))
+        _end_sessions(conn, user_id)
         _log(conn, admin_id, "block_user", user_id, reason=reason)
 
 
@@ -480,6 +489,7 @@ def deactivate_user(conn, user_id, *, admin_id, reason):
                 "AND status IN ('placed','assigned')", (user_id,)).fetchone():
             raise LedgerError("user has unfinished orders")
         conn.execute("UPDATE users SET active = 0 WHERE id = ?", (user_id,))
+        _end_sessions(conn, user_id)
         _log(conn, admin_id, "deactivate_user", user_id, reason=reason)
 
 

@@ -32,6 +32,27 @@ Users (in `app/ledger.py`):
 An order with a supplier can't be cancelled directly: `unassign_supplier` first
 (after checking with the supplier that it wasn't paid), then `cancel_order`.
 
+Login (`app/auth.py`) and what the web app calls (`app/api.py`):
+- log in with phone (any usual form) and password; passwords stored with scrypt;
+- an admin issues a one-time setup code (`issue_setup_code`, valid 72 hours); the
+  worker uses it to choose their own password (`set_password_with_code`); the
+  same is used for a forgotten password. The admin never knows the password;
+- 5 wrong tries lock the account for 15 minutes; an unknown phone and a wrong
+  password give the same message;
+- sessions: a week for workers; 8 hours for admins, ending after 30 minutes
+  idle. Only hashes of tokens and codes are stored. Logout, logout everywhere,
+  change password (ends other sessions). Blocking or deactivating someone logs
+  them out at once;
+- `app/api.py` acts as the logged-in user: balance, statement, send money by
+  phone, prices, quotes, orders (without supplier or margin details). Admin
+  screens get the admin's id with `api.admin_id(conn, token)`.
+
+Set up a new database with the first admin:
+
+    from app import auth
+    conn = auth.connect("wallet.db")
+    auth.create_first_admin(conn, "Name", "091 000 0000", "a strong password")
+
 Needs Python 3.10+ only (standard library). Run the tests from this folder:
 
     python3 -m unittest
@@ -40,4 +61,4 @@ The schema assumes a fresh database: there are no migrations yet, so a database
 file made by an earlier version must be recreated.
 
 Not built yet: suppliers paid in foreign currency instead of LYD, approvals,
-login, screens (Arabic, English, French), hosting and backups.
+the web server (with per-IP rate limits on login), screens (Arabic, English, French), hosting and backups.
