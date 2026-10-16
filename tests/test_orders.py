@@ -15,6 +15,7 @@ def lyd(x):
 class OrderTests(unittest.TestCase):
     def setUp(self):
         self.db = O.connect(":memory:")
+        self.addCleanup(self.db.close)
         self.admin = L.create_user(self.db, "admin", "Admin", "0910000000")
         self.ali = L.create_user(self.db, "customer", "Ali", "0911111111",
                                  admin_id=self.admin)
@@ -169,6 +170,18 @@ class OrderTests(unittest.TestCase):
         o = self.order()
         L._reverse(self.db, o["charge_txn_id"], self.admin, "bypass")
         self.assertTrue(O.verify(self.db))
+
+    def test_huge_foreign_amounts_are_refused_cleanly(self):
+        for amount in ("1e30", "1e999999", "2e15"):
+            with self.assertRaises(L.InvalidAmount):
+                O.get_quote(self.db, self.ali, "USD", amount, now=T0)
+
+    def test_no_order_on_a_currency_switched_off_after_the_quote(self):
+        q = O.get_quote(self.db, self.ali, "USD", "10", now=T0)
+        self.db.execute("UPDATE currencies SET active = 0 WHERE code = 'USD'")
+        with self.assertRaises(L.LedgerError):
+            O.place_order(self.db, self.ali, q["quote_id"], "Ahmed", "A1", now=T0)
+        self.assertEqual(L.balance(self.db, self.ali), lyd("1000"))
 
 
 if __name__ == "__main__":

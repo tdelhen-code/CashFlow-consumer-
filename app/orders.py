@@ -10,13 +10,14 @@ The LYD for an order stays in SYS_ORDERS until supplier settlement is recorded
 """
 import secrets
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, DecimalException, ROUND_HALF_UP, localcontext
 
 from . import ledger as L
 
 QUOTE_MINUTES = 10
 RECEIPT_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I
 RECEIPT_LENGTH = 10
+MAX_NUMBER = Decimal(10**12)   # upper bound for rates and foreign amounts typed in
 
 
 class QuoteExpired(L.LedgerError):
@@ -117,10 +118,12 @@ def _now(now):
 def _decimal(text, places, what):
     try:
         d = Decimal(str(text).strip())
-    except InvalidOperation:
+    except DecimalException:
         raise L.InvalidAmount(f"{what} is not a number")
     if not d.is_finite() or d <= 0:
         raise L.InvalidAmount(f"{what} must be more than zero")
+    if d > MAX_NUMBER:
+        raise L.InvalidAmount(f"{what} is too large")
     if d != d.quantize(Decimal(1).scaleb(-places)):
         raise L.InvalidAmount(f"{what}: at most {places} decimal places")
     return d
@@ -193,10 +196,14 @@ def get_quote(conn, customer_id, currency, foreign_amount, *, now=None):
         if not price:
             raise L.LedgerError(f"no price set for {currency}")
         rate = Decimal(price["rate"])
-        cost = int((amount * rate * L.DIRHAMS_PER_LYD)
-                   .quantize(Decimal(1), rounding=ROUND_HALF_UP))
+        with localcontext() as ctx:
+            ctx.prec = 60   # exact for any amount and rate that pass _decimal
+            cost = int((amount * rate * L.DIRHAMS_PER_LYD)
+                       .quantize(Decimal(1), rounding=ROUND_HALF_UP))
         if cost <= 0:
             raise L.InvalidAmount("amount too small")
+        if cost > L.MAX_DIRHAMS:
+            raise L.InvalidAmount("amount too large")
         quote_id = secrets.token_urlsafe(12)
         expires = now + timedelta(minutes=QUOTE_MINUTES)
         conn.execute(
@@ -236,6 +243,7 @@ def place_order(conn, customer_id, quote_id, beneficiary_name, beneficiary_id, *
             return dict(existing)
         if now >= datetime.fromisoformat(q["expires_at"]):
             raise QuoteExpired("price expired, get a new one")
+        _active_currency(conn, q["currency"])
         receipt = _new_receipt_code(conn)
         txn = L._charge_order(conn, customer_id, q["cost"], order_ref=receipt,
                               idempotency_key=f"quote:{quote_id}")

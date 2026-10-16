@@ -16,15 +16,22 @@ Other rules:
   are fixed with a reversal, which is itself a new recorded transaction.
 - Admin actions need an active admin and are written to the admin log.
 - Writes can carry an idempotency key, so a double tap or retry can't post twice.
+  Keys are scoped to the person sending them and the kind of action, and a key
+  reused with different details is refused instead of answered with the old result.
+- Any single amount is at most MAX_DIRHAMS (1 billion LYD).
 """
 import json
 import re
 import sqlite3
+from collections import namedtuple
 from contextlib import contextmanager
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException
 
 DIRHAMS_PER_LYD = 1000
+MAX_DIRHAMS = 10**12
 SYSTEM_ACCOUNTS = ("SYS_ORDERS", "SYS_FEES", "SYS_CAPITAL")
+ROLES = ("customer", "admin")
+LANGUAGES = ("ar", "en", "fr")
 
 
 class LedgerError(Exception):
@@ -80,6 +87,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   note TEXT,
   reference TEXT,
   idempotency_key TEXT UNIQUE,
+  request TEXT,                       -- details the idempotency key was used for
   reverses_txn_id INTEGER UNIQUE REFERENCES transactions(id)
 );
 
@@ -134,10 +142,12 @@ def parse_lyd(text):
     """'12.345' -> 12345 dirhams. Rejects more than 3 decimals."""
     try:
         d = Decimal(str(text).strip())
-    except InvalidOperation:
+    except DecimalException:
         raise InvalidAmount("not a number")
     if not d.is_finite():
         raise InvalidAmount("not a number")
+    if d.copy_abs() > MAX_DIRHAMS // DIRHAMS_PER_LYD:
+        raise InvalidAmount("amount too large")
     dirhams = d * DIRHAMS_PER_LYD
     if dirhams != dirhams.to_integral_value():
         raise InvalidAmount("at most 3 decimal places")
@@ -153,17 +163,24 @@ def format_lyd(dirhams):
 def _check_amount(amount):
     if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
         raise InvalidAmount("amount must be a positive whole number of dirhams")
+    if amount > MAX_DIRHAMS:
+        raise InvalidAmount("amount too large")
 
 
 def _check_fee(fee):
     if not isinstance(fee, int) or isinstance(fee, bool) or fee < 0:
         raise InvalidAmount("fee must be zero or a positive whole number of dirhams")
+    if fee > MAX_DIRHAMS:
+        raise InvalidAmount("fee too large")
 
 
 def commission(gross, rate_bp, minimum=0):
     """Commission on a gross amount. rate_bp is basis points (100 = 1%).
     Rounds half up, never below `minimum`."""
     _check_amount(gross)
+    if not isinstance(rate_bp, int) or isinstance(rate_bp, bool) or not 0 <= rate_bp <= 10000:
+        raise InvalidAmount("rate must be whole basis points from 0 to 10000")
+    _check_fee(minimum)
     fee = (gross * rate_bp + 5000) // 10000
     return max(fee, minimum)
 
@@ -195,12 +212,24 @@ def _write(conn):
         raise
 
 
-def _existing(conn, key):
+Idem = namedtuple("Idem", "key request existing")
+NO_IDEM = Idem(None, None, None)
+
+
+def _idempotent(conn, key, actor, kind, **details):
+    """Scope a caller's idempotency key to who sent it and what it is for.
+    `existing` is the transaction already posted with it, if any. The same key
+    with different details is an error, so two phones that happen to pick the
+    same key can't make one of them think its money moved when it didn't."""
     if key is None:
-        return None
-    row = conn.execute(
-        "SELECT id FROM transactions WHERE idempotency_key = ?", (key,)).fetchone()
-    return row["id"] if row else None
+        return NO_IDEM
+    scoped = f"{actor}:{kind}:{key}"
+    request = json.dumps(details, sort_keys=True, default=str)
+    row = conn.execute("SELECT id, request FROM transactions WHERE idempotency_key = ?",
+                       (scoped,)).fetchone()
+    if row and row["request"] != request:
+        raise LedgerError("idempotency key already used for a different request")
+    return Idem(scoped, request, row["id"] if row else None)
 
 
 def _customer_account(conn, user_id):
@@ -240,13 +269,14 @@ def _log(conn, admin_id, action, target=None, **details):
 
 
 def _post(conn, kind, entries, created_by, note=None, reference=None,
-          idempotency_key=None, reverses_txn_id=None):
+          idem=NO_IDEM, reverses_txn_id=None):
     if sum(amount for _, amount in entries) != 0:
         raise LedgerError("transaction does not balance")
+    entries = [(account_id, amount) for account_id, amount in entries if amount]
     cur = conn.execute(
         "INSERT INTO transactions(kind, created_by, note, reference, idempotency_key, "
-        "reverses_txn_id) VALUES (?,?,?,?,?,?)",
-        (kind, created_by, note, reference, idempotency_key, reverses_txn_id))
+        "request, reverses_txn_id) VALUES (?,?,?,?,?,?,?)",
+        (kind, created_by, note, reference, idem.key, idem.request, reverses_txn_id))
     txn_id = cur.lastrowid
     for account_id, amount in entries:
         try:
@@ -267,6 +297,10 @@ def _post(conn, kind, entries, created_by, note=None, reference=None,
 def create_user(conn, role, name, phone, language="ar", password_hash=None, *,
                 admin_id=None):
     """Only an admin can create users. The very first admin is created without one."""
+    if role not in ROLES:
+        raise LedgerError(f"role must be one of {', '.join(ROLES)}")
+    if language not in LANGUAGES:
+        raise LedgerError(f"language must be one of {', '.join(LANGUAGES)}")
     with _write(conn):
         if admin_id is None:
             if role != "admin" or conn.execute(
@@ -306,13 +340,14 @@ def deposit(conn, user_id, amount, *, admin_id, into, idempotency_key=None, note
     _check_amount(amount)
     with _write(conn):
         _require_admin(conn, admin_id)
-        existing = _existing(conn, idempotency_key)
-        if existing:
-            return existing
+        idem = _idempotent(conn, idempotency_key, admin_id, "deposit",
+                           user_id=user_id, amount=amount, into=into)
+        if idem.existing:
+            return idem.existing
         acc = _customer_account(conn, user_id)
         hold = _holding(conn, into)
         txn = _post(conn, "deposit", [(hold, -amount), (acc, amount)], admin_id,
-                    note=note, reference=into, idempotency_key=idempotency_key)
+                    note=note, reference=into, idem=idem)
         _log(conn, admin_id, "deposit", txn, user_id=user_id, amount=amount, into=into)
         return txn
 
@@ -326,14 +361,15 @@ def payroll_credit(conn, items, *, admin_id, batch_ref, into="BANK",
         _check_amount(amount)
     with _write(conn):
         _require_admin(conn, admin_id)
-        existing = _existing(conn, idempotency_key)
-        if existing:
-            return existing
+        idem = _idempotent(conn, idempotency_key, admin_id, "payroll", items=list(items),
+                           batch_ref=batch_ref, into=into)
+        if idem.existing:
+            return idem.existing
         total = sum(amount for _, amount in items)
         entries = [(_holding(conn, into), -total)]
         entries += [(_customer_account(conn, uid), amount) for uid, amount in items]
         txn = _post(conn, "payroll", entries, admin_id, note=note, reference=batch_ref,
-                    idempotency_key=idempotency_key)
+                    idem=idem)
         _log(conn, admin_id, "payroll", txn, batch_ref=batch_ref, workers=len(items),
              total=total, into=into)
         return txn
@@ -347,14 +383,14 @@ def capital(conn, code, amount, *, admin_id, direction, note=None, idempotency_k
     sign = -1 if direction == "in" else 1
     with _write(conn):
         _require_admin(conn, admin_id)
-        existing = _existing(conn, idempotency_key)
-        if existing:
-            return existing
+        idem = _idempotent(conn, idempotency_key, admin_id, "capital", code=code,
+                           amount=amount, direction=direction)
+        if idem.existing:
+            return idem.existing
         txn = _post(conn, "capital",
                     [(_holding(conn, code), sign * amount),
                      (_system(conn, "SYS_CAPITAL"), -sign * amount)],
-                    admin_id, note=note, reference=f"{direction}:{code}",
-                    idempotency_key=idempotency_key)
+                    admin_id, note=note, reference=f"{direction}:{code}", idem=idem)
         _log(conn, admin_id, "capital", txn, code=code, amount=amount, direction=direction)
         return txn
 
@@ -368,17 +404,18 @@ def transfer(conn, from_user, to_user, amount, *, fee=0, created_by=None,
     _check_fee(fee)
     if from_user == to_user:
         raise LedgerError("cannot transfer to yourself")
+    actor = created_by or from_user
     with _write(conn):
-        existing = _existing(conn, idempotency_key)
-        if existing:
-            return existing
+        idem = _idempotent(conn, idempotency_key, actor, "transfer", from_user=from_user,
+                           to_user=to_user, amount=amount, fee=fee)
+        if idem.existing:
+            return idem.existing
         src = _customer_account(conn, from_user)
         dst = _customer_account(conn, to_user)
         entries = [(src, -(amount + fee)), (dst, amount)]
         if fee:
             entries.append((_system(conn, "SYS_FEES"), fee))
-        return _post(conn, "transfer", entries, created_by or from_user,
-                     note=note, idempotency_key=idempotency_key)
+        return _post(conn, "transfer", entries, actor, note=note, idem=idem)
 
 
 def move_money(conn, from_code, to_code, amount, *, admin_id, note=None,
@@ -389,13 +426,14 @@ def move_money(conn, from_code, to_code, amount, *, admin_id, note=None,
         raise LedgerError("from and to are the same")
     with _write(conn):
         _require_admin(conn, admin_id)
-        existing = _existing(conn, idempotency_key)
-        if existing:
-            return existing
+        idem = _idempotent(conn, idempotency_key, admin_id, "move", from_code=from_code,
+                           to_code=to_code, amount=amount)
+        if idem.existing:
+            return idem.existing
         src = _holding(conn, from_code)
         dst = _holding(conn, to_code)
         txn = _post(conn, "move", [(src, amount), (dst, -amount)], admin_id, note=note,
-                    reference=f"{from_code}->{to_code}", idempotency_key=idempotency_key)
+                    reference=f"{from_code}->{to_code}", idem=idem)
         _log(conn, admin_id, "move_money", txn, source=from_code, destination=to_code,
              amount=amount)
         return txn
@@ -405,8 +443,11 @@ def _charge_order(conn, user_id, amount, *, order_ref, idempotency_key=None):
     """Used by orders.place_order inside its own database transaction."""
     _check_amount(amount)
     acc = _customer_account(conn, user_id)
+    idem = _idempotent(conn, idempotency_key, user_id, "order", amount=amount)
+    if idem.existing:
+        raise LedgerError("this order was already charged")
     return _post(conn, "order", [(acc, -amount), (_system(conn, "SYS_ORDERS"), amount)],
-                 user_id, reference=order_ref, idempotency_key=idempotency_key)
+                 user_id, reference=order_ref, idem=idem)
 
 
 # ---------- money out ----------
@@ -421,15 +462,16 @@ def withdraw_cash(conn, user_id, gross, fee, *, admin_id, from_till,
         raise InvalidAmount("fee must be less than the amount")
     with _write(conn):
         _require_admin(conn, admin_id)
-        existing = _existing(conn, idempotency_key)
-        if existing:
-            return existing
+        idem = _idempotent(conn, idempotency_key, admin_id, "withdrawal", user_id=user_id,
+                           gross=gross, fee=fee, from_till=from_till)
+        if idem.existing:
+            return idem.existing
         acc = _customer_account(conn, user_id)
         entries = [(acc, -gross), (_holding(conn, from_till), gross - fee)]
         if fee:
             entries.append((_system(conn, "SYS_FEES"), fee))
         txn = _post(conn, "withdrawal", entries, admin_id, note=note,
-                    reference=from_till, idempotency_key=idempotency_key)
+                    reference=from_till, idem=idem)
         _log(conn, admin_id, "withdraw_cash", txn, user_id=user_id, gross=gross,
              fee=fee, till=from_till)
         return txn
@@ -444,7 +486,7 @@ def _txn_kind(conn, txn_id):
     return row["kind"]
 
 
-def _reverse(conn, txn_id, admin_id, reason, idempotency_key=None):
+def _reverse(conn, txn_id, admin_id, reason, idem=NO_IDEM):
     if not (reason or "").strip():
         raise LedgerError("a reason is required")
     if _txn_kind(conn, txn_id) == "reversal":
@@ -456,8 +498,7 @@ def _reverse(conn, txn_id, admin_id, reason, idempotency_key=None):
         "SELECT account_id, amount FROM entries WHERE txn_id = ?", (txn_id,)).fetchall()
     entries = [(r["account_id"], -r["amount"]) for r in rows]
     return _post(conn, "reversal", entries, admin_id, note=reason.strip(),
-                 reference=f"reverses #{txn_id}", idempotency_key=idempotency_key,
-                 reverses_txn_id=txn_id)
+                 reference=f"reverses #{txn_id}", idem=idem, reverses_txn_id=txn_id)
 
 
 def reverse(conn, txn_id, *, admin_id, reason, idempotency_key=None):
@@ -465,12 +506,12 @@ def reverse(conn, txn_id, *, admin_id, reason, idempotency_key=None):
     Currency orders are cancelled with orders.cancel_order instead."""
     with _write(conn):
         _require_admin(conn, admin_id)
-        existing = _existing(conn, idempotency_key)
-        if existing:
-            return existing
+        idem = _idempotent(conn, idempotency_key, admin_id, "reversal", txn_id=txn_id)
+        if idem.existing:
+            return idem.existing
         if _txn_kind(conn, txn_id) == "order":
             raise LedgerError("cancel the order instead, so its status stays correct")
-        txn = _reverse(conn, txn_id, admin_id, reason, idempotency_key)
+        txn = _reverse(conn, txn_id, admin_id, reason, idem)
         _log(conn, admin_id, "reverse", txn, reverses=txn_id, reason=reason)
         return txn
 
@@ -549,8 +590,8 @@ def reconcile(conn, counts):
     One row per account: what the books say, what is really there, and the gap."""
     rows = []
     for code, actual in counts.items():
-        if not isinstance(actual, int) or isinstance(actual, bool):
-            raise InvalidAmount("counts must be whole dirhams")
+        if not isinstance(actual, int) or isinstance(actual, bool) or actual < 0:
+            raise InvalidAmount("counts must be zero or more whole dirhams")
         expected = holding_amount(conn, code)
         rows.append({"account": code, "expected": expected, "actual": actual,
                      "difference": actual - expected, "ok": actual == expected})

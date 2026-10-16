@@ -11,6 +11,7 @@ def lyd(x):
 class LedgerTests(unittest.TestCase):
     def setUp(self):
         self.db = L.connect(":memory:")
+        self.addCleanup(self.db.close)
         self.admin = L.create_user(self.db, "admin", "Admin", "0910000000")
         self.ali = L.create_user(self.db, "customer", "Ali", "0911111111",
                                  admin_id=self.admin)
@@ -31,9 +32,20 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(L.format_lyd(12345), "12.345")
         self.assertEqual(L.format_lyd(1234567000), "1,234,567.000")
         self.assertEqual(L.format_lyd(-500), "-0.500")
-        for bad in ("1.2345", "abc", "NaN", "inf", ""):
+        for bad in ("1.2345", "abc", "NaN", "inf", "", "1e30", "1e999999999"):
             with self.assertRaises(L.InvalidAmount):
                 L.parse_lyd(bad)
+        self.assertEqual(L.parse_lyd("1000000000"), L.MAX_DIRHAMS)
+
+    def test_amounts_above_the_cap_are_refused(self):
+        with self.assertRaises(L.InvalidAmount):
+            L.deposit(self.db, self.ali, L.MAX_DIRHAMS + 1, admin_id=self.admin,
+                      into="BANK")
+        with self.assertRaises(L.InvalidAmount):
+            L.commission(1000, 1.5)
+        with self.assertRaises(L.LedgerError):
+            L.create_user(self.db, "customer", "X", "0966666666", "de",
+                          admin_id=self.admin)
 
     def test_commission_rounding_and_minimum(self):
         self.assertEqual(L.commission(lyd("500"), 100), lyd("5"))        # 1%
@@ -137,6 +149,24 @@ class LedgerTests(unittest.TestCase):
         b = L.deposit(self.db, self.ali, lyd("50"), admin_id=self.admin,
                       into="BANK", idempotency_key="dep-1")
         self.assertEqual(a, b)
+        self.assertEqual(L.balance(self.db, self.ali), lyd("50"))
+
+    def test_same_key_from_two_workers_moves_both(self):
+        self.fund(self.ali, "100")
+        self.fund(self.sam, "100")
+        bob = L.create_user(self.db, "customer", "Bob", "0955555555", admin_id=self.admin)
+        a = L.transfer(self.db, self.ali, bob, lyd("10"), idempotency_key="tx-1")
+        b = L.transfer(self.db, self.sam, bob, lyd("20"), idempotency_key="tx-1")
+        self.assertNotEqual(a, b)
+        self.assertEqual(L.balance(self.db, bob), lyd("30"))
+        self.assertEqual(L.balance(self.db, self.sam), lyd("80"))
+
+    def test_same_key_with_different_details_is_refused(self):
+        L.deposit(self.db, self.ali, lyd("50"), admin_id=self.admin,
+                  into="BANK", idempotency_key="dep-1")
+        with self.assertRaises(L.LedgerError):
+            L.deposit(self.db, self.ali, lyd("60"), admin_id=self.admin,
+                      into="BANK", idempotency_key="dep-1")
         self.assertEqual(L.balance(self.db, self.ali), lyd("50"))
 
     # --- cash out ---
