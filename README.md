@@ -60,5 +60,27 @@ Needs Python 3.10+ only (standard library). Run the tests from this folder:
 The schema assumes a fresh database: there are no migrations yet, so a database
 file made by an earlier version must be recreated.
 
+## Web API (`app/web.py`)
+
+Run it locally (plain http, so the cookie is allowed without HTTPS):
+
+    python3 -m app.web --db wallet.db --port 8000 --insecure-cookies
+
+In production, serve `make_app("/path/wallet.db", trust_proxy=True)` with a WSGI
+server (waitress, gunicorn) behind HTTPS. JSON in and out; POSTs must be
+`Content-Type: application/json`. The session is an HttpOnly, SameSite=Strict
+cookie, or `Authorization: Bearer <token>`. Login and setup-password are limited
+to 20 tries per address per 10 minutes. Errors: `{"error", "type"}` with 400
+(bad input), 401 (log in), 403 (not allowed / blocked), 404, 409 (balance, cash
+or quote expired), 415, 429 (too many tries), 500 (nothing internal shown).
+
+| | |
+|---|---|
+| Everyone | `POST /api/login`, `/api/setup-password`, `/api/logout`, `/api/logout-everywhere`, `/api/change-password` |
+| Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send`, `/api/quote`, `/api/orders` |
+| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`; `POST /api/admin/users` (returns the setup code), `/api/admin/users/<id>/setup-code`, `.../whatsapp`, `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate` |
+| Admin: money | `POST /api/admin/deposit`, `/payroll`, `/withdraw`, `/move`, `/reverse`, `/tills`, `/reconcile`; `GET /api/admin/health` |
+| Admin: orders | `POST /api/admin/currencies`, `/prices`, `/suppliers`, `/suppliers/<id>/price`, `/suppliers/<id>/pay`, `/orders/<id>/assign`, `/orders/<id>/unassign`, `/orders/<id>/cancel`, `/orders/paid`; `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=`, `/margin?since=&until=` |
+
 Not built yet: suppliers paid in foreign currency instead of LYD, approvals,
-the web server (with per-IP rate limits on login), screens (Arabic, English, French), hosting and backups.
+screens (Arabic, English, French), hosting and backups.
