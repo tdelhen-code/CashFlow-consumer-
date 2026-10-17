@@ -11,7 +11,8 @@ Rules every request follows:
 - The session is the `session` cookie (HttpOnly, Secure, SameSite=Strict) or
   an `Authorization: Bearer <token>` header for a phone app.
 - Amounts are typed text in LYD ("12.5"); answers carry dirhams and LYD text.
-- Login and setup-code tries are also limited per internet address.
+- Login, setup-code and change-password tries are also limited per internet
+  address.
 - Errors come back as {"error": message, "type": kind} with a fitting status;
   unexpected errors say only "internal error" and are logged on the server.
 """
@@ -41,7 +42,8 @@ LOGIN_WINDOW_SECONDS = 10 * 60
 COOKIE = "session"
 
 ERROR_STATUS = [            # first match wins, so subclasses come first
-    (A.LoginFailed, 401), (A.NotLoggedIn, 401), (A.AccountLocked, 429),
+    (A.WrongPassword, 403), (A.LoginFailed, 401), (A.NotLoggedIn, 401),
+    (A.AccountLocked, 429),
     (L.PermissionDenied, 403), (L.AccountBlocked, 403), (L.UnknownAccount, 404),
     (O.QuoteExpired, 409), (L.InsufficientFunds, 409), (L.NotEnoughCash, 409),
     (L.Conflict, 409), (L.LedgerError, 400),
@@ -206,6 +208,7 @@ def logout_everywhere(app, conn, req):
 
 @route("POST", "/api/change-password")
 def change_password(app, conn, req):
+    app.login_limiter.check(req.ip)
     A.change_password(conn, req.token, req.get("old_password"), req.get("new_password"))
     return {"ok": True}
 
@@ -280,14 +283,15 @@ def admin_create_user(app, conn, req):
                             req.get("name"), req.get("phone"),
                             req.get("language", required=False) or "ar",
                             admin_id=admin, whatsapp=req.get("whatsapp", required=False))
-    code = A.issue_setup_code(conn, user_id, admin_id=admin)
+    code = A.issue_setup_code(conn, user_id, admin_id=admin,
+                              reason=req.get("reason", required=False) or "new account")
     return {"id": user_id, "setup_code": code}
 
 
 @route("POST", "/api/admin/users/<id>/setup-code")
 def admin_setup_code(app, conn, req):
-    return {"setup_code": A.issue_setup_code(conn, req.int("id"),
-                                             admin_id=_admin(conn, req))}
+    return {"setup_code": A.issue_setup_code(conn, req.int("id"), admin_id=_admin(conn, req),
+                                             reason=req.get("reason", required=False))}
 
 
 @route("POST", "/api/admin/users/<id>/whatsapp")
@@ -305,7 +309,8 @@ def _user_action(func):
 
 
 for _name, _func in (("block", L.block_user), ("unblock", L.unblock_user),
-                     ("deactivate", L.deactivate_user), ("reactivate", L.reactivate_user)):
+                     ("deactivate", L.deactivate_user), ("reactivate", L.reactivate_user),
+                     ("unlock", A.unlock_login)):
     route("POST", f"/api/admin/users/<id>/{_name}")(_user_action(_func))
 
 

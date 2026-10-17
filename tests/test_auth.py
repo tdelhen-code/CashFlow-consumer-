@@ -1,10 +1,16 @@
+import hashlib
+import json
+import threading
+import time
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 
 from app import api
 from app import auth as A
 from app import ledger as L
 from app import orders as O
+from tests import STRONG_SCRYPT
 
 T0 = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
 ADMIN_PW = "Office-Pass-2026"
@@ -114,8 +120,9 @@ class AuthTests(unittest.TestCase):
             with self.assertRaises(A.LoginFailed):
                 self.login_ali("wrong-password", at=T0 + timedelta(seconds=i))
         last_try = T0 + timedelta(seconds=A.MAX_FAILED_LOGINS - 1)
-        with self.assertRaises(A.AccountLocked):
+        with self.assertRaises(A.LoginFailed) as caught:    # even the right password
             self.login_ali(at=last_try + timedelta(minutes=14))
+        self.assertEqual(str(caught.exception), A.LOGIN_FAILED)
         self.login_ali(at=last_try + timedelta(minutes=A.LOCK_MINUTES, seconds=1))
 
     def test_a_good_login_resets_the_count(self):
@@ -129,14 +136,13 @@ class AuthTests(unittest.TestCase):
         self.login_ali()
 
     def test_wrong_setup_codes_count_towards_the_lock(self):
-        A.issue_setup_code(self.db, self.sam, admin_id=self.admin, now=T0)
         for _ in range(A.MAX_FAILED_LOGINS):
             with self.assertRaises(A.LoginFailed):
-                A.set_password_with_code(self.db, "0922222222", "GUESS234", "pass-word-1",
-                                         now=T0)
-        with self.assertRaises(A.AccountLocked):
-            A.set_password_with_code(self.db, "0922222222", "GUESS235", "pass-word-1",
-                                     now=T0)
+                A.set_password_with_code(self.db, "0911111111", "GUESS-2345-6789",
+                                         "pass-word-1", now=T0)
+        with self.assertRaises(A.LoginFailed):
+            self.login_ali()
+        self.login_ali(at=T0 + timedelta(minutes=A.LOCK_MINUTES, seconds=1))
 
     # --- sessions ---
     def test_worker_session_lasts_a_week(self):
@@ -190,9 +196,250 @@ class AuthTests(unittest.TestCase):
         with self.assertRaises(A.LoginFailed):
             self.login_ali()
 
+    # --- races: something changes while a password is being hashed ---
+    def meanwhile(self, action):
+        """Run `action` while the next password is being hashed, which happens
+        outside the write lock."""
+        real, done = A.hash_password, []
+
+        def hash_password(secret):
+            if not done:
+                done.append(True)
+                action()
+            return real(secret)
+        return unittest.mock.patch.object(A, "hash_password", hash_password)
+
+    def ali_hash(self):
+        return self.db.execute("SELECT password_hash FROM users WHERE id = ?",
+                               (self.ali,)).fetchone()[0]
+
+    def test_change_password_is_refused_if_reset_meanwhile(self):
+        here = self.login_ali()
+        reset = lambda: A.issue_setup_code(self.db, self.ali, admin_id=self.admin, now=T0)
+        with self.meanwhile(reset), self.assertRaises(A.NotLoggedIn):
+            A.change_password(self.db, here, ALI_PW, "thief-pass-1", now=T0)
+        self.assertIsNone(self.ali_hash())
+        with self.assertRaises(A.LoginFailed):
+            self.login_ali("thief-pass-1")
+
+    def test_change_password_is_refused_if_blocked_meanwhile(self):
+        here = self.login_ali()
+        block = lambda: L.block_user(self.db, self.ali, admin_id=self.admin, reason="doubt")
+        with self.meanwhile(block), self.assertRaises(A.NotLoggedIn):
+            A.change_password(self.db, here, ALI_PW, "thief-pass-1", now=T0)
+        L.unblock_user(self.db, self.ali, admin_id=self.admin, reason="cleared")
+        self.login_ali()
+
+    def test_change_password_is_refused_if_changed_meanwhile(self):
+        here = self.login_ali()
+        other = lambda: A.change_password(self.db, here, ALI_PW, "owner-pass-1", now=T0)
+        with self.meanwhile(other), self.assertRaises(L.Conflict):
+            A.change_password(self.db, here, ALI_PW, "thief-pass-1", now=T0)
+        self.login_ali("owner-pass-1")
+
+    def test_setup_code_is_refused_if_blocked_meanwhile(self):
+        code = A.issue_setup_code(self.db, self.ali, admin_id=self.admin, now=T0)
+        block = lambda: L.block_user(self.db, self.ali, admin_id=self.admin, reason="doubt")
+        with self.meanwhile(block), self.assertRaises(L.AccountBlocked):
+            A.set_password_with_code(self.db, "0911111111", code, "brand-new-1", now=T0)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND ended_at IS NULL",
+            (self.ali,)).fetchone()[0], 0)
+
+    def test_using_a_setup_code_ends_every_other_session(self):
+        code = A.issue_setup_code(self.db, self.ali, admin_id=self.admin, now=T0)
+        ali = self.db.execute("SELECT * FROM users WHERE id = ?", (self.ali,)).fetchone()
+        with L._write(self.db):         # one opened after the code was issued
+            stray = A._new_session(self.db, ali, T0)
+        token = A.set_password_with_code(self.db, "0911111111", code, "brand-new-1", now=T0)
+        A.authenticate(self.db, token, now=T0)
+        with self.assertRaises(A.NotLoggedIn):
+            A.authenticate(self.db, stray, now=T0)
+
+    # --- guessing the current password ---
+    def test_wrong_current_passwords_count_towards_the_lock(self):
+        here = self.login_ali()
+        for i in range(A.MAX_FAILED_LOGINS):
+            with self.assertRaises(A.WrongPassword):
+                A.change_password(self.db, here, f"guess-{i}-guess", "thief-pass-1", now=T0)
+        with self.assertRaises(A.AccountLocked):
+            A.change_password(self.db, here, ALI_PW, "thief-pass-1", now=T0)
+        with self.assertRaises(A.LoginFailed):
+            self.login_ali()
+        A.authenticate(self.db, here, now=T0)       # still logged in
+        self.login_ali(at=T0 + timedelta(minutes=A.LOCK_MINUTES, seconds=1))
+
+    def test_change_password_checks_the_new_one_first(self):
+        here = self.login_ali()
+        answers = []
+        for old in (ALI_PW, "wrong-guess-1"):
+            with self.assertRaises(L.LedgerError) as caught:
+                A.change_password(self.db, here, old, "x", now=T0)
+            answers.append((type(caught.exception), str(caught.exception)))
+        self.assertEqual(len(set(answers)), 1, answers)     # no hint the first was right
+
+    # --- setup codes ---
+    def test_setup_codes_are_long_and_stored_with_salted_scrypt(self):
+        code = A.issue_setup_code(self.db, self.sam, admin_id=self.admin, now=T0)
+        plain = code.replace("-", "")
+        self.assertGreaterEqual(len(plain), 10)
+        self.assertLessEqual(set(plain), set(A.SETUP_CODE_ALPHABET))
+        stored = self.db.execute("SELECT code_hash FROM setup_codes WHERE user_id = ?",
+                                 (self.sam,)).fetchone()[0]
+        self.assertTrue(stored.startswith("scrypt$"))
+        self.assertEqual(len(stored.split("$")), 6)         # with its own salt
+        typed = " ".join(plain[i:i + 4] for i in range(0, len(plain), 4)).lower()
+        A.set_password_with_code(self.db, "0922222222", typed, "sam-pass-99", now=T0)
+
+    def test_a_right_setup_code_works_while_locked_and_lifts_the_lock(self):
+        for _ in range(A.MAX_FAILED_LOGINS):
+            with self.assertRaises(A.LoginFailed):
+                self.login_ali("wrong-password")
+        code = A.issue_setup_code(self.db, self.ali, admin_id=self.admin, now=T0)
+        token = A.set_password_with_code(self.db, "0911111111", code, "brand-new-1", now=T0)
+        A.authenticate(self.db, token, now=T0)
+        self.login_ali("brand-new-1")
+
+    # --- unknown phones look like registered ones ---
+    def test_locked_unknown_and_wrong_get_the_same_answer(self):
+        for _ in range(A.MAX_FAILED_LOGINS):
+            for phone in ("0911111111", "0933333333"):
+                with self.assertRaises(A.LoginFailed):
+                    A.login(self.db, phone, "wrong-password", now=T0)
+        answers = []
+        for phone, password in (("0911111111", ALI_PW), ("0911111111", "wrong-password"),
+                                ("0933333333", ALI_PW), ("0944444444", ALI_PW)):
+            with self.assertRaises(A.LoginFailed) as caught:
+                A.login(self.db, phone, password, now=T0)
+            answers.append((type(caught.exception), str(caught.exception)))
+        self.assertEqual(len(set(answers)), 1, answers)
+
+    def test_unknown_phones_take_the_same_slow_check(self):
+        A.issue_setup_code(self.db, self.sam, admin_id=self.admin, now=T0)
+        tries = [lambda phone=phone: A.set_password_with_code(
+                     self.db, phone, "WRONG-CODE-2345", "pass-word-1", now=T0)
+                 for phone in ("0922222222", "0911111111", "0933333333")]
+        tries += [lambda phone=phone: A.login(self.db, phone, "wrong-password", now=T0)
+                  for phone in ("0911111111", "0922222222", "0933333333")]
+        for attempt in tries:
+            with unittest.mock.patch("hashlib.scrypt", wraps=hashlib.scrypt) as spy:
+                with self.assertRaises(A.LoginFailed):
+                    attempt()
+            self.assertEqual(spy.call_count, 1)
+
+    # --- admin unlock ---
+    def test_admin_can_unlock_a_locked_account(self):
+        for _ in range(A.MAX_FAILED_LOGINS):
+            with self.assertRaises(A.LoginFailed):
+                self.login_ali("wrong-password")
+        with self.assertRaises(A.LoginFailed):
+            self.login_ali()
+        with self.assertRaises(L.PermissionDenied):
+            A.unlock_login(self.db, self.ali, admin_id=self.sam, reason="please")
+        with self.assertRaises(L.LedgerError):
+            A.unlock_login(self.db, self.ali, admin_id=self.admin, reason=" ")
+        A.unlock_login(self.db, self.ali, admin_id=self.admin,
+                       reason="Ali called: someone keeps guessing", now=T0)
+        self.login_ali()
+        row = self.db.execute("SELECT admin_id, target, details FROM admin_log "
+                              "WHERE action = 'unlock_login'").fetchone()
+        self.assertEqual((row["admin_id"], row["target"], json.loads(row["details"])),
+                         (self.admin, str(self.ali),
+                          {"reason": "Ali called: someone keeps guessing"}))
+
+    # --- admins and setup codes ---
+    def test_setup_codes_are_logged_and_need_a_reason_for_admins(self):
+        boss = L.create_user(self.db, "admin", "Boss", "0930000000", admin_id=self.admin)
+        with self.assertRaises(L.LedgerError):
+            A.issue_setup_code(self.db, boss, admin_id=self.admin, now=T0)
+        code = A.issue_setup_code(self.db, boss, admin_id=self.admin,
+                                  reason="new office admin", now=T0)
+        A.set_password_with_code(self.db, "0930000000", code, "boss-pass-1", now=T0)
+        rows = self.db.execute(
+            "SELECT admin_id, action, details, at FROM admin_log WHERE target = ? "
+            "AND action LIKE '%setup_code%' ORDER BY id", (str(boss),)).fetchall()
+        self.assertEqual([(r["admin_id"], r["action"], json.loads(r["details"]).get("reason"))
+                          for r in rows],
+                         [(self.admin, "issue_setup_code", "new office admin"),
+                          (self.admin, "setup_code_used", None)])
+        self.assertTrue(all(r["at"] for r in rows))
+
+    # --- password strength ---
+    def test_common_passwords_and_phone_digits_are_refused(self):
+        code = A.issue_setup_code(self.db, self.sam, admin_id=self.admin, now=T0)
+        for bad in ("123456789", "1234567890", "9876543210", "qwertyuiop", "QWERTYUIOP",
+                    "azertyuiop", "Password123", "iloveyou123", "sam+218922222222",
+                    "my 092 222 2222"):
+            with self.assertRaises(L.LedgerError, msg=bad):
+                A.set_password_with_code(self.db, "0922222222", code, bad, now=T0)
+        A.set_password_with_code(self.db, "0922222222", code, "fine-pass-1", now=T0)
+
+    def test_scrypt_cost_is_strong_by_default(self):
+        self.assertGreaterEqual(STRONG_SCRYPT["n"], 2**15)
+        self.assertGreaterEqual(STRONG_SCRYPT["r"], 8)
+        with unittest.mock.patch.object(A, "SCRYPT", STRONG_SCRYPT):
+            stored = A.hash_password("strong-pass-1")
+        self.assertEqual(stored.split("$")[1:4],
+                         [str(STRONG_SCRYPT[k]) for k in ("n", "r", "p")])
+        self.assertTrue(A.verify_password("strong-pass-1", stored))
+
+    def test_an_older_hash_is_redone_at_login(self):
+        before = self.ali_hash()
+        stronger = dict(A.SCRYPT, n=A.SCRYPT["n"] * 2)
+        with unittest.mock.patch.object(A, "SCRYPT", stronger):
+            self.login_ali()
+            after = self.ali_hash()
+            self.assertEqual(after.split("$")[1], str(stronger["n"]))
+            self.assertNotEqual(before, after)
+            self.login_ali(at=T0 + timedelta(seconds=1))
+            self.assertEqual(self.ali_hash(), after)       # done once
+
+    def test_only_a_few_passwords_are_hashed_at_once(self):
+        lock, running, most = threading.Lock(), [0], [0]
+        real = hashlib.scrypt
+
+        def scrypt(*args, **kwargs):
+            with lock:
+                running[0] += 1
+                most[0] = max(most[0], running[0])
+            time.sleep(0.02)
+            with lock:
+                running[0] -= 1
+            return real(*args, **kwargs)
+
+        with unittest.mock.patch("hashlib.scrypt", scrypt):
+            threads = [threading.Thread(target=A.hash_password, args=(f"pass-word-{i}",))
+                       for i in range(3 * A.MAX_PARALLEL_HASHES)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertLessEqual(most[0], A.MAX_PARALLEL_HASHES)
+
+    # --- reading pages doesn't write ---
+    def test_last_seen_is_written_at_most_once_a_minute(self):
+        token = self.login_ali()
+        statements = []
+        self.db.set_trace_callback(statements.append)
+        self.addCleanup(self.db.set_trace_callback, None)
+        A.authenticate(self.db, token, now=T0 + timedelta(seconds=30))
+        self.assertEqual([s for s in statements if not s.lstrip().startswith("SELECT")], [])
+        A.authenticate(self.db, token, now=T0 + timedelta(seconds=61))
+        self.assertTrue([s for s in statements if s.startswith("UPDATE sessions")])
+
+    def test_admin_idle_limit_is_never_late(self):
+        token = A.login(self.db, "0910000000", ADMIN_PW, now=T0)
+        A.authenticate(self.db, token, now=T0 + timedelta(seconds=50))
+        with self.assertRaises(A.NotLoggedIn):
+            A.authenticate(self.db, token, now=T0 + timedelta(minutes=31))
+        token = A.login(self.db, "0910000000", ADMIN_PW, now=T0)
+        A.authenticate(self.db, token, now=T0 + timedelta(minutes=29))
+        A.authenticate(self.db, token, now=T0 + timedelta(minutes=58))
+
     def test_blocked_admin_is_logged_out(self):
         boss = L.create_user(self.db, "admin", "Boss", "0930000000", admin_id=self.admin)
-        code = A.issue_setup_code(self.db, boss, admin_id=self.admin, now=T0)
+        code = A.issue_setup_code(self.db, boss, admin_id=self.admin, reason="new admin",
+                                  now=T0)
         token = A.set_password_with_code(self.db, "0930000000", code, "boss-pass-1", now=T0)
         L.block_user(self.db, boss, admin_id=self.admin, reason="suspicious payouts")
         with self.assertRaises(A.NotLoggedIn):

@@ -384,6 +384,58 @@ class WebTests(unittest.TestCase):
             "/api/login", {"phone": "0910000000", "password": "Office-Pass-2026"})
         self.assertEqual(status, 200)
 
+    def test_registered_and_unknown_phones_answer_alike(self):
+        self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        answers = {}
+        for phone, ip in (("0911111111", "203.0.113.1"), ("0933333333", "203.0.113.2")):
+            client = Client(self.app, ip=ip)
+            answers[phone] = [client.post("/api/login", {"phone": phone,
+                                                         "password": "guess-guess-1"})
+                              for _ in range(A.MAX_FAILED_LOGINS + 1)]
+        self.assertEqual(answers["0911111111"], answers["0933333333"])
+        self.assertEqual({status for status, _ in answers["0911111111"]}, {401})
+        locked = Client(self.app, ip="198.51.100.7").post(
+            "/api/login", {"phone": "0911111111", "password": "ali-wallet-77"})
+        self.assertEqual(locked, answers["0933333333"][-1])
+
+    def test_admin_unlocks_a_locked_worker(self):
+        ali_id, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        attacker = Client(self.app, ip="203.0.113.1")
+        for _ in range(A.MAX_FAILED_LOGINS):
+            attacker.post("/api/login", {"phone": "0911111111", "password": "guess-guess-1"})
+        login = {"phone": "0911111111", "password": "ali-wallet-77"}
+        self.assertEqual(Client(self.app).post("/api/login", login)[0], 401)
+        path = f"/api/admin/users/{ali_id}/unlock"
+        self.assertEqual(ali.post(path, {"reason": "it's me"})[0], 403)
+        self.assertEqual(self.admin.post(path, {})[0], 400)
+        self.assertEqual(self.admin.post(path, {"reason": "someone kept guessing"})[0], 200)
+        self.assertEqual(Client(self.app).post("/api/login", login)[0], 200)
+
+    def test_change_password_tries_are_limited(self):
+        _, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        wrong = {"old_password": "guess-guess-1", "new_password": "thief-pass-1"}
+        status, body = ali.post("/api/change-password", wrong)
+        self.assertEqual((status, body["type"]), (403, "WrongPassword"))
+        self.assertEqual(ali.get("/api/me")[0], 200)        # a typo doesn't log out
+        for _ in range(A.MAX_FAILED_LOGINS - 1):
+            ali.post("/api/change-password", wrong)
+        status, body = ali.post("/api/change-password", {"old_password": "ali-wallet-77",
+                                                         "new_password": "thief-pass-1"})
+        self.assertEqual((status, body["type"]), (429, "AccountLocked"))
+        for _ in range(web.LOGIN_TRIES_PER_IP):         # and counted per address
+            status, body = ali.post("/api/change-password", wrong)
+        self.assertEqual((status, body["type"]), (429, "http"))
+
+    def test_setup_code_for_an_admin_needs_a_reason(self):
+        status, made = self.admin.post("/api/admin/users", {
+            "name": "Boss", "phone": "0930000000", "role": "admin"})
+        self.assertEqual(status, 200)
+        self.assertRegex(made["setup_code"], r"^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$")
+        path = f"/api/admin/users/{made['id']}/setup-code"
+        self.assertEqual(self.admin.post(path, {})[0], 400)
+        status, body = self.admin.post(path, {"reason": "Boss forgot the password"})
+        self.assertEqual(status, 200, body)
+
     def test_rate_limiter_window(self):
         now = [0.0]
         limiter = web.RateLimiter(2, 60, clock=lambda: now[0])

@@ -69,16 +69,38 @@ worker's statement shows a reversal only as "Order cancelled" or, for an
 `/api/admin/reverse`, "Correction by admin".
 
 Login (`app/auth.py`) and what the web app calls (`app/api.py`):
-- log in with phone (any usual form) and password; passwords stored with scrypt;
-- an admin issues a one-time setup code (`issue_setup_code`, valid 72 hours); the
-  worker uses it to choose their own password (`set_password_with_code`); the
-  same is used for a forgotten password. The admin never knows the password;
-- 5 wrong tries lock the account for 15 minutes; an unknown phone and a wrong
-  password give the same message;
+- log in with phone (any usual form) and password. A password has at least 10
+  characters, is not a much-used one (`1234567890`, `qwertyuiop`, `password123`,
+  ...) and doesn't contain the user's phone number. Passwords are stored with
+  scrypt (N=2^15, r=8, p=1); the cost is kept with each hash, and a hash made
+  with an older cost is redone at the next login. At most 4 hashes run at once,
+  so many logins at the same time can't use up the memory;
+- an admin issues a one-time setup code (`issue_setup_code`, valid 72 hours,
+  12 characters shown as `XXXX-XXXX-XXXX`, typed in any case, with or without
+  the dashes); the worker uses it to choose their own password
+  (`set_password_with_code`), which ends every other session of theirs; the
+  same is used for a forgotten password. Codes are stored with salted scrypt,
+  like passwords;
+- the admin sees the code, so until the worker uses it, that admin could use
+  it and act as the worker (or as another admin). This can't be ruled out while
+  admins hand out codes. Instead, issuing a code and using it are both in the
+  admin log (who issued it and when; its use is logged under the issuing
+  admin), and a code for an admin's account needs a reason. A worker whose code
+  was already used, or who is logged out unexpectedly, must report it. Later:
+  a second admin approves resetting an admin's account;
+- 5 wrong tries in a row (password, setup code, or the current password when
+  changing it) lock that phone number for 15 minutes, registered or not. An
+  unknown phone, a wrong password and a locked account get the same answer and
+  the same slow check, so login can't be used to find out who has an account. A
+  right setup code still works while locked and lifts the lock; an admin can
+  lift it too (`unlock_login`, with a reason, logged);
 - sessions: a week for workers; 8 hours for admins, ending after 30 minutes
-  idle. Only hashes of tokens and codes are stored. Logout, logout everywhere,
-  change password (ends other sessions). Blocking or deactivating someone logs
-  them out at once;
+  idle. Activity is written at most once a minute, so reading pages doesn't wait
+  for other writes; the idle limit can end a session up to a minute early,
+  never late. Only hashes of tokens are stored. Logout, logout everywhere,
+  change password (ends other sessions; refused if meanwhile the password was
+  reset or changed, or the user was blocked or logged out). Blocking or
+  deactivating someone logs them out at once;
 - `app/api.py` acts as the logged-in user: balance, statement (without admins'
   reversal reasons), send money by phone, prices, quotes, orders (without
   supplier or margin details). Admin screens get the admin's id with
@@ -106,13 +128,17 @@ Run it locally (plain http, so the cookie is allowed without HTTPS):
 In production, serve `make_app("/path/wallet.db", trust_proxy=True)` with a WSGI
 server (waitress, gunicorn) behind HTTPS. JSON in and out; POSTs must be
 `Content-Type: application/json`. The session is an HttpOnly, SameSite=Strict
-cookie, or `Authorization: Bearer <token>`. Login and setup-password are limited
-to 20 tries per address per 10 minutes. Errors: `{"error", "type"}` with 400
-(bad input), 401 (log in), 403 (not allowed / blocked, including a blocked
-worker's order), 404, 409 (balance, cash, quote expired or price corrected,
-already exists, payroll batch already posted, quote already used for another
-beneficiary, order already with a supplier or with another one than given),
-415, 429 (too many tries), 500 (nothing internal shown).
+cookie, or `Authorization: Bearer <token>`. Login, setup-password and
+change-password are limited to 20 tries per address per 10 minutes. Errors:
+`{"error", "type"}` with 400 (bad input), 401 (log in; also a wrong or unknown
+login, or a locked one), 403 (not allowed / blocked, including a blocked
+worker's order; `WrongPassword` for a wrong current password on
+change-password, which doesn't log out), 404, 409 (balance, cash, quote expired
+or price corrected, already exists, payroll batch already posted, quote already
+used for another beneficiary, order already with a supplier or with another one
+than given, password changed meanwhile), 415, 429 (too many tries from an
+address; `AccountLocked` when a logged-in user's current-password tries are
+locked), 500 (nothing internal shown).
 
 `idempotency_key` (text, at most 200 characters) is required on `POST /api/send`
 and on the admin money routes `/api/admin/deposit`, `/payroll`, `/withdraw`,
@@ -124,9 +150,10 @@ transaction can be reversed only once anyway). A missing or blank key is a 400.
 |---|---|
 | Everyone | `POST /api/login`, `/api/setup-password`, `/api/logout`, `/api/logout-everywhere`, `/api/change-password` |
 | Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send`, `/api/quote`, `/api/orders` |
-| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`; `POST /api/admin/users` (returns the setup code), `/api/admin/users/<id>/setup-code`, `.../whatsapp`, `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate` |
+| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`; `POST /api/admin/users` (returns the setup code; `reason` optional, "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason}`, required for an admin's account), `.../whatsapp`, `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (`{reason}`: lifts a lock from wrong tries) |
 | Admin: money | `POST /api/admin/deposit`, `/payroll`, `/withdraw`, `/move`, `/reverse`, `/tills`, `/reconcile`; `GET /api/admin/health` |
 | Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`), `/suppliers`, `/suppliers/<id>/price`, `/suppliers/<id>/pay`, `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?}`); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
 
-Not built yet: suppliers paid in foreign currency instead of LYD, approvals,
-screens (Arabic, English, French), hosting and backups.
+Not built yet: suppliers paid in foreign currency instead of LYD, approvals
+(such as a second admin approving a reset of an admin's account), screens
+(Arabic, English, French), hosting and backups.
