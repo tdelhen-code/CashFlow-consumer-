@@ -377,12 +377,15 @@ def admin_add_till(app, conn, req):
 @route("GET", "/api/admin/health")
 def admin_health(app, conn, req):
     _admin(conn, req)
-    holdings = conn.execute("SELECT code FROM accounts WHERE kind = 'holding' ORDER BY code")
-    return {"problems": O.verify(conn),
-            "owed_to_workers": _money(L.owed_to_customers(conn)),
-            "holdings": {r["code"]: _money(L.holding_amount(conn, r["code"])) for r in holdings},
-            "margin": _money(L.account_balance(conn, "SYS_MARGIN")),
-            "fees": _money(L.account_balance(conn, "SYS_FEES"))}
+    with L._read(conn):     # every number below from the same moment
+        holdings = conn.execute(
+            "SELECT code FROM accounts WHERE kind = 'holding' ORDER BY code").fetchall()
+        return {"problems": O.verify(conn),
+                "owed_to_workers": _money(L.owed_to_customers(conn)),
+                "holdings": {r["code"]: _money(L.holding_amount(conn, r["code"]))
+                             for r in holdings},
+                "margin": _money(L.account_balance(conn, "SYS_MARGIN")),
+                "fees": _money(L.account_balance(conn, "SYS_FEES"))}
 
 
 @route("POST", "/api/admin/reconcile")
@@ -457,10 +460,11 @@ def admin_supplier_statement(app, conn, req):
 def admin_orders(app, conn, req):
     _admin(conn, req)
     status = req.query.get("status")
-    sql, args = "SELECT * FROM orders", []
+    sql, args = ("SELECT o.*, u.blocked AS customer_blocked FROM orders o "
+                 "JOIN users u ON u.id = o.customer_id"), []
     if status:
-        sql, args = sql + " WHERE status = ?", [status]
-    rows = conn.execute(sql + " ORDER BY id DESC LIMIT ?", args + [_limit(req)])
+        sql, args = sql + " WHERE o.status = ?", [status]
+    rows = conn.execute(sql + " ORDER BY o.id DESC LIMIT ?", args + [_limit(req)])
     return {"orders": [dict(r) for r in rows]}
 
 
@@ -486,18 +490,33 @@ def admin_cancel(app, conn, req):
 
 @route("POST", "/api/admin/orders/paid")
 def admin_mark_paid(app, conn, req):
-    return {"txn_id": O.mark_paid(conn, req.get("receipt_code"), req.get("payout_ref"),
-                                  admin_id=_admin(conn, req))}
+    expected = req.get("supplier_id", required=False)     # whose confirmation this is
+    return {"txn_id": O.mark_paid(
+        conn, req.get("receipt_code"), req.get("payout_ref"), admin_id=_admin(conn, req),
+        supplier_id=None if expected in (None, "") else req.number("supplier_id"))}
+
+
+def _report_time(text):
+    """A report boundary: a date (2026-10-01) or an ISO time with Z or an offset.
+    Without an offset it is UTC (margin_report). An offset's '+' sent without
+    URL-encoding arrives as a space, so it is put back."""
+    text = text.strip()
+    text = re.sub(r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)"
+                  r" (\d{2}(?::?\d{2})?)$", r"\1+\2", text)
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    return datetime.fromisoformat(text)
 
 
 @route("GET", "/api/admin/margin")
 def admin_margin(app, conn, req):
     _admin(conn, req)
     try:
-        since, until = (datetime.fromisoformat(req.query[k]) if req.query.get(k) else None
+        since, until = (_report_time(req.query[k]) if req.query.get(k) else None
                         for k in ("since", "until"))
     except ValueError:
-        raise HttpError(400, "since/until must be ISO dates like 2026-10-01T00:00:00+00:00")
+        raise HttpError(400, "since/until must be dates like 2026-10-01 or times like "
+                             "2026-10-01T00:00:00Z (no zone = UTC)")
     return {"rows": O.margin_report(conn, since, until)}
 
 

@@ -86,6 +86,42 @@ class UserTests(unittest.TestCase):
         with self.assertRaises(L.AccountBlocked):
             O.place_order(self.db, self.ali, q["quote_id"], "Ahmed", "A1")
 
+    def order(self, amount="1"):
+        q = O.get_quote(self.db, self.ali, "USD", amount)
+        return O.place_order(self.db, self.ali, q["quote_id"], "Ahmed", "A1")
+
+    def test_a_blocked_workers_orders_are_held_but_can_be_cancelled(self):
+        supplier = O.add_supplier(self.db, "Cairo agent", admin_id=self.admin)
+        O.set_supplier_price(self.db, supplier, "USD", "7.80", admin_id=self.admin)
+        placed, assigned = self.order(), self.order()
+        O.assign_supplier(self.db, assigned["id"], supplier, admin_id=self.admin)
+        L.block_user(self.db, self.ali, admin_id=self.admin, reason="suspected fraud")
+        with self.assertRaises(L.AccountBlocked):
+            O.assign_supplier(self.db, placed["id"], supplier, admin_id=self.admin)
+        with self.assertRaises(L.AccountBlocked):
+            O.mark_paid(self.db, assigned["receipt_code"], "EG-1", admin_id=self.admin)
+        O.unassign_supplier(self.db, assigned["id"], admin_id=self.admin,
+                            reason="worker blocked, supplier has not paid")
+        for o in (placed, assigned):
+            O.cancel_order(self.db, o["id"], admin_id=self.admin, reason="worker blocked")
+        self.assertEqual(L.balance(self.db, self.ali), lyd("100"))   # refunded, frozen
+        with self.assertRaises(L.AccountBlocked):
+            L.transfer(self.db, self.ali, self.sam, lyd("1"))
+        self.assertEqual(O.verify(self.db), [])
+
+    def test_unblocking_releases_held_orders(self):
+        supplier = O.add_supplier(self.db, "Cairo agent", admin_id=self.admin)
+        O.set_supplier_price(self.db, supplier, "USD", "7.80", admin_id=self.admin)
+        o = self.order()
+        O.assign_supplier(self.db, o["id"], supplier, admin_id=self.admin)
+        L.block_user(self.db, self.ali, admin_id=self.admin, reason="doubt")
+        with self.assertRaises(L.AccountBlocked):
+            O.mark_paid(self.db, o["receipt_code"], "EG-1", admin_id=self.admin)
+        L.unblock_user(self.db, self.ali, admin_id=self.admin, reason="cleared")
+        O.mark_paid(self.db, o["receipt_code"], "EG-1", admin_id=self.admin)
+        self.assertEqual(O.find_by_receipt(self.db, o["receipt_code"])["status"], "paid")
+        self.assertEqual(O.verify(self.db), [])
+
     def test_salary_and_deposits_still_reach_a_blocked_worker(self):
         L.block_user(self.db, self.ali, admin_id=self.admin, reason="under review")
         L.payroll_credit(self.db, [(self.ali, lyd("50"))], admin_id=self.admin,

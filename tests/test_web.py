@@ -275,6 +275,69 @@ class WebTests(unittest.TestCase):
                                          dict(switch, active=True))[0], 200)
         self.assertEqual(ali.post("/api/quote", {"currency": "USD", "amount": "10"})[0], 200)
 
+    # --- orders: replays, stale screens, blocked workers ---
+    def test_order_conflicts_and_blocked_workers_over_http(self):
+        ali_id, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        for path, body in (
+                ("/api/admin/deposit", {"user_id": ali_id, "amount": "1000", "into": "BANK",
+                                        "idempotency_key": "d1"}),
+                ("/api/admin/currencies", {"code": "USD"}),
+                ("/api/admin/prices", {"currency": "USD", "rate": "7.85"}),
+                ("/api/admin/suppliers", {"name": "Cairo agent"}),
+                ("/api/admin/suppliers", {"name": "Tunis agent"}),
+                ("/api/admin/suppliers/1/price", {"currency": "USD", "rate": "7.80"}),
+                ("/api/admin/suppliers/2/price", {"currency": "USD", "rate": "7.82"})):
+            self.assertEqual(self.admin.post(path, body)[0], 200, path)
+
+        def place(**details):
+            _, quote = ali.post("/api/quote", {"currency": "USD", "amount": "10"})
+            return dict({"quote_id": quote["quote_id"], "beneficiary_name": "Ahmed",
+                         "beneficiary_id": "A1"}, **details)
+
+        body = place()
+        status, first = ali.post("/api/orders", body)
+        self.assertEqual(ali.post("/api/orders", body)[1]["receipt_code"],
+                         first["receipt_code"])
+        status, answer = ali.post("/api/orders", dict(body, beneficiary_id="A2"))
+        self.assertEqual((status, answer["type"]), (409, "Conflict"))
+
+        assign = f"/api/admin/orders/{first['id']}/assign"
+        self.assertEqual(self.admin.post(assign, {"supplier_id": 1})[0], 200)
+        self.assertEqual(self.admin.post(assign, {"supplier_id": 2})[0], 409)
+        self.assertEqual(self.admin.post(f"/api/admin/orders/{first['id']}/unassign",
+                                         {"reason": "Cairo has not paid"})[0], 200)
+        self.assertEqual(self.admin.post(assign, {"supplier_id": 2})[0], 200)
+        paid = {"receipt_code": first["receipt_code"], "payout_ref": "CAIRO-77"}
+        status, answer = self.admin.post("/api/admin/orders/paid", dict(paid, supplier_id=1))
+        self.assertEqual((status, answer["type"]), (409, "Conflict"))
+        self.assertEqual(self.admin.post("/api/admin/orders/paid",
+                                         dict(paid, supplier_id="x"))[0], 400)
+        self.assertEqual(self.admin.post("/api/admin/orders/paid", dict(
+            paid, payout_ref="TUNIS-1", supplier_id=2))[0], 200)
+
+        status, held = ali.post("/api/orders", place())
+        self.assertEqual(self.admin.post(f"/api/admin/users/{ali_id}/block",
+                                         {"reason": "suspected fraud"})[0], 200)
+        status, queue = self.admin.get("/api/admin/orders?status=placed")
+        self.assertEqual([(o["id"], o["customer_blocked"]) for o in queue["orders"]],
+                         [(held["id"], 1)])
+        status, answer = self.admin.post(f"/api/admin/orders/{held['id']}/assign",
+                                         {"supplier_id": 1})
+        self.assertEqual((status, answer["type"]), (403, "AccountBlocked"))
+        self.assertEqual(self.admin.post(f"/api/admin/orders/{held['id']}/cancel",
+                                         {"reason": "worker blocked"})[0], 200)
+        self.assertEqual(self.admin.get("/api/admin/health")[1]["problems"], [])
+
+    def test_margin_dates_in_the_usual_forms(self):
+        for query in ("since=2026-10-01T00:00:00+00:00",       # '+' not URL-encoded
+                      "since=2026-10-01T00:00:00%2B02:00", "since=2026-10-01T00:00:00Z",
+                      "since=2026-10-01&until=2026-11-01", "until=2026-10-01T00:00-01:00"):
+            status, body = self.admin.get(f"/api/admin/margin?{query}")
+            self.assertEqual((status, body), (200, {"rows": []}), query)
+        status, body = self.admin.get("/api/admin/margin?since=October")
+        self.assertEqual(status, 400)
+        self.assertIn("2026-10-01T00:00:00Z", body["error"])
+
     # --- request hygiene ---
     def test_posts_must_be_json(self):
         status, _ = self.admin.post("/api/admin/currencies", content_type="text/plain",

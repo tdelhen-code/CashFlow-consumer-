@@ -1,6 +1,10 @@
+import json
+import os
 import sqlite3
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from app import ledger as L
 from app import orders as O
@@ -75,15 +79,47 @@ class SettlementTests(unittest.TestCase):
         self.assertEqual(O.supplier_balance(self.db, self.cairo), lyd("780"))
         self.assertHealthy()
 
-    def test_one_off_rate_and_reassigning_recompute_the_cost(self):
+    def test_one_off_rate_and_reassigning_after_unassign_recompute_the_cost(self):
         o = self.order("100")
         O.assign_supplier(self.db, o["id"], self.cairo, admin_id=self.admin, rate="7.81")
         self.assertEqual(O.find_by_receipt(self.db, o["receipt_code"])["supplier_cost"],
                          lyd("781"))
+        O.unassign_supplier(self.db, o["id"], admin_id=self.admin,
+                            reason="Cairo confirmed it was not paid")
         self.pay_out(o, supplier=self.tunis)
         self.assertEqual(O.supplier_balance(self.db, self.cairo), 0)
         self.assertEqual(O.supplier_balance(self.db, self.tunis), lyd("782"))
         self.assertEqual(L.account_balance(self.db, "SYS_MARGIN"), lyd("3"))
+        self.assertHealthy()
+
+    def test_an_assigned_order_moves_only_through_unassign(self):
+        o = self.order("100")
+        O.assign_supplier(self.db, o["id"], self.cairo, admin_id=self.admin)
+        O.set_supplier_price(self.db, self.cairo, "USD", "7.95", admin_id=self.admin)
+        for supplier in (self.tunis, self.cairo):     # another one, or the same again
+            with self.assertRaises(L.Conflict):
+                O.assign_supplier(self.db, o["id"], supplier, admin_id=self.admin)
+        held = O.find_by_receipt(self.db, o["receipt_code"])
+        self.assertEqual((held["supplier_id"], held["supplier_cost"]),
+                         (self.cairo, lyd("780")))
+        self.assertHealthy()
+
+    def test_a_stale_confirmation_does_not_pay_the_wrong_supplier(self):
+        o = self.order("100")
+        O.assign_supplier(self.db, o["id"], self.cairo, admin_id=self.admin)
+        O.unassign_supplier(self.db, o["id"], admin_id=self.admin, reason="Cairo is slow")
+        O.assign_supplier(self.db, o["id"], self.tunis, admin_id=self.admin)
+        with self.assertRaises(L.Conflict):        # Cairo's confirmation, typed in late
+            O.mark_paid(self.db, o["receipt_code"], "CAIRO-77", admin_id=self.admin,
+                        supplier_id=self.cairo)
+        self.assertEqual(O.find_by_receipt(self.db, o["receipt_code"])["status"], "assigned")
+        self.assertEqual(O.supplier_balance(self.db, self.tunis), 0)
+        O.mark_paid(self.db, o["receipt_code"], "TUNIS-1", admin_id=self.admin,
+                    supplier_id=self.tunis)
+        self.assertEqual(O.supplier_balance(self.db, self.tunis), lyd("782"))
+        logged = self.db.execute(
+            "SELECT details FROM admin_log WHERE action = 'mark_paid'").fetchone()[0]
+        self.assertEqual(json.loads(logged)["supplier_id"], self.tunis)
         self.assertHealthy()
 
     def test_assigning_needs_an_agreed_rate(self):
@@ -197,6 +233,21 @@ class SettlementTests(unittest.TestCase):
         self.assertEqual(sum(r["margin"] for r in everything),
                          L.account_balance(self.db, "SYS_MARGIN"))
         self.assertHealthy()
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset")
+    def test_margin_report_times_without_a_zone_are_utc(self):
+        sept_30_late = datetime(2026, 9, 30, 23, 0, tzinfo=timezone.utc)
+        self.pay_out(self.order("100", at=sept_30_late), at=sept_30_late)
+        try:
+            with mock.patch.dict(os.environ, {"TZ": "LYT-2"}):   # server on UTC+2
+                time.tzset()
+                september = O.margin_report(self.db, since=datetime(2026, 9, 1),
+                                            until=datetime(2026, 10, 1))
+                october = O.margin_report(self.db, since=datetime(2026, 10, 1),
+                                          until=datetime(2026, 11, 1))
+        finally:
+            time.tzset()                                      # back to the real zone
+        self.assertEqual(([r["orders"] for r in september], october), ([1], []))
 
     def test_verify_catches_margin_posted_outside_an_order(self):
         L._post(self.db, "payout", [(L._system(self.db, "SYS_ORDERS"), -1),

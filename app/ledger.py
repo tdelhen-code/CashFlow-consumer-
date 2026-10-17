@@ -32,6 +32,9 @@ Users:
   orders.
 - Block = freeze while a problem or doubt is looked into. A blocked worker can't
   send, receive, order or take cash, but salary and admin deposits still come in.
+  Their open currency orders are held too: no supplier can be assigned and no
+  payout recorded until they are unblocked (an admin can still unassign and
+  cancel, which refunds to the frozen balance).
   Blocked admins lose admin rights. Both need a reason and are logged.
 """
 import json
@@ -80,7 +83,8 @@ class AccountBlocked(LedgerError):
 
 class Conflict(LedgerError):
     """Clashes with something already recorded: an existing till, currency or
-    supplier, or a payroll batch that was already posted."""
+    supplier, a payroll batch that was already posted, a quote already used for
+    another beneficiary, or an order that is (now) with a different supplier."""
 
 
 SCHEMA = """
@@ -278,6 +282,21 @@ def _write(conn):
     except BaseException:
         conn.execute("ROLLBACK")
         raise
+
+
+@contextmanager
+def _read(conn):
+    """Several reads from one snapshot, so a check never compares a number from
+    before another connection's write with one from after it. Inside a
+    transaction already (such as _write), that transaction is the snapshot."""
+    if conn.in_transaction:
+        yield
+        return
+    conn.execute("BEGIN DEFERRED")
+    try:
+        yield
+    finally:
+        conn.execute("COMMIT")      # nothing was written; this just ends the read
 
 
 Idem = namedtuple("Idem", "key request existing")
@@ -794,34 +813,36 @@ def _statement(conn, acc, limit):
 # ---------- checks ----------
 
 def verify_ledger(conn):
-    """Internal consistency check, safe to run every hour. Empty list = healthy."""
-    problems = []
-    total = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM entries").fetchone()[0]
-    if total != 0:
-        problems.append(f"ledger total is {total}, expected 0")
-    for r in conn.execute(
-            "SELECT txn_id, SUM(amount) AS s FROM entries GROUP BY txn_id "
-            "HAVING SUM(amount) <> 0"):
-        problems.append(f"transaction {r['txn_id']} does not balance ({r['s']})")
-    for r in conn.execute(
-            "SELECT id FROM transactions WHERE id NOT IN (SELECT txn_id FROM entries)"):
-        problems.append(f"transaction {r['id']} has no entries")
-    for r in conn.execute(
-            "SELECT a.code, SUM(e.amount) AS s FROM entries e "
-            "JOIN accounts a ON a.id = e.account_id WHERE a.kind = 'customer' "
-            "GROUP BY a.id HAVING SUM(e.amount) < 0"):
-        problems.append(f"account {r['code']} is negative ({r['s']})")
-    for r in conn.execute(
-            "SELECT a.code, SUM(e.amount) AS s FROM entries e "
-            "JOIN accounts a ON a.id = e.account_id WHERE a.kind = 'holding' "
-            "GROUP BY a.id HAVING SUM(e.amount) > 0"):
-        problems.append(f"{r['code']} shows less than zero money ({-r['s']})")
-    for r in conn.execute(
-            "SELECT a.code, SUM(e.amount) AS s FROM entries e "
-            "JOIN accounts a ON a.id = e.account_id JOIN users u ON u.id = a.user_id "
-            "WHERE u.active = 0 GROUP BY a.id HAVING SUM(e.amount) <> 0"):
-        problems.append(f"account {r['code']} of a deactivated user holds {r['s']}")
-    return problems
+    """Internal consistency check, safe to run every hour. Empty list = healthy.
+    All of it reads one snapshot, so writes going on meanwhile can't confuse it."""
+    with _read(conn):
+        problems = []
+        total = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM entries").fetchone()[0]
+        if total != 0:
+            problems.append(f"ledger total is {total}, expected 0")
+        for r in conn.execute(
+                "SELECT txn_id, SUM(amount) AS s FROM entries GROUP BY txn_id "
+                "HAVING SUM(amount) <> 0"):
+            problems.append(f"transaction {r['txn_id']} does not balance ({r['s']})")
+        for r in conn.execute(
+                "SELECT id FROM transactions WHERE id NOT IN (SELECT txn_id FROM entries)"):
+            problems.append(f"transaction {r['id']} has no entries")
+        for r in conn.execute(
+                "SELECT a.code, SUM(e.amount) AS s FROM entries e "
+                "JOIN accounts a ON a.id = e.account_id WHERE a.kind = 'customer' "
+                "GROUP BY a.id HAVING SUM(e.amount) < 0"):
+            problems.append(f"account {r['code']} is negative ({r['s']})")
+        for r in conn.execute(
+                "SELECT a.code, SUM(e.amount) AS s FROM entries e "
+                "JOIN accounts a ON a.id = e.account_id WHERE a.kind = 'holding' "
+                "GROUP BY a.id HAVING SUM(e.amount) > 0"):
+            problems.append(f"{r['code']} shows less than zero money ({-r['s']})")
+        for r in conn.execute(
+                "SELECT a.code, SUM(e.amount) AS s FROM entries e "
+                "JOIN accounts a ON a.id = e.account_id JOIN users u ON u.id = a.user_id "
+                "WHERE u.active = 0 GROUP BY a.id HAVING SUM(e.amount) <> 0"):
+            problems.append(f"account {r['code']} of a deactivated user holds {r['s']}")
+        return problems
 
 
 def reconcile(conn, counts):

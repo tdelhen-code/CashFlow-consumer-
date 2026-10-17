@@ -310,6 +310,17 @@ class LedgerTests(unittest.TestCase):
         self.db.execute("UPDATE entries SET amount = amount + 1 WHERE id = 1")
         self.assertTrue(L.verify_ledger(self.db))
 
+    def test_verify_ledger_reads_one_snapshot(self):
+        self.fund(self.ali, "100")
+        statements = []
+        self.db.set_trace_callback(statements.append)
+        self.assertHealthy()
+        self.db.set_trace_callback(None)
+        self.assertEqual((statements[0], statements[-1]), ("BEGIN DEFERRED", "COMMIT"))
+        self.assertFalse(self.db.in_transaction)
+        with L._write(self.db):         # inside a write it reads that transaction
+            self.assertHealthy()
+
     def test_admin_actions_are_logged(self):
         self.fund(self.ali, "100")
         row = self.db.execute(

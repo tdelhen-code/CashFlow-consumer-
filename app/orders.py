@@ -4,8 +4,10 @@ Flow: admin sets a price -> worker gets a quote, locked for 10 minutes -> worker
 places the order with the beneficiary's name and ID -> the LYD leaves the balance
 at once and a receipt code is issued -> admin assigns a supplier -> admin marks it
 paid with the supplier's confirmation reference. Paid and cancelled orders are final.
-An order with a supplier can't be cancelled directly: first unassign it (after
-checking with the supplier that they have not paid), then cancel.
+An order with a supplier can't be cancelled or given to another supplier
+directly: first unassign it (after checking with the supplier that they have
+not paid), then cancel or assign again. A blocked worker's orders are held: no
+supplier is assigned and no payout recorded until they are unblocked.
 
 A wrong price: set the right one with void_quotes=True, which also makes every
 quote taken before it unusable (by default a quote keeps its price for its 10
@@ -144,9 +146,17 @@ def connect(path=":memory:"):
     return conn
 
 
+def _utc(when):
+    """The time in UTC. A time without a zone is taken as UTC, never as the
+    server's local time (which is what astimezone would assume)."""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc)
+
+
 def _now(now):
     """Always UTC, so stored times compare correctly as text."""
-    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return _utc(now or datetime.now(timezone.utc))
 
 
 def _decimal(text, places, what):
@@ -160,7 +170,11 @@ def _decimal(text, places, what):
         raise L.InvalidAmount(f"{what} is too large")
     if d != d.quantize(Decimal(1).scaleb(-places)):
         raise L.InvalidAmount(f"{what}: at most {places} decimal places")
-    return d
+    # One text per value, in plain digits and at least 2 decimals, so what is
+    # stored and shown never depends on how it was typed: '1E+1' -> '10.00',
+    # '7.850' -> '7.85'.
+    d = d.normalize()
+    return d if d.as_tuple().exponent <= -2 else d.quantize(Decimal("0.01"))
 
 
 def _lyd_cost(foreign_amount, rate):
@@ -189,6 +203,15 @@ def _get_order(conn, order_id):
     if not row:
         raise L.LedgerError("order not found")
     return row
+
+
+def _customer_not_blocked(conn, order):
+    """A blocked worker's orders are held: no supplier and no payout until they
+    are unblocked. Unassigning and cancelling (a refund) still work."""
+    if conn.execute("SELECT blocked FROM users WHERE id = ?",
+                    (order["customer_id"],)).fetchone()["blocked"]:
+        raise L.AccountBlocked("the worker is blocked: their orders are held until "
+                               "they are unblocked (or cancel the order)")
 
 
 def _active_currency(conn, code):
@@ -348,7 +371,8 @@ def _new_receipt_code(conn):
 def place_order(conn, customer_id, quote_id, beneficiary_name, beneficiary_id, *,
                 now=None):
     """Charge the quote's LYD cost and issue a receipt code. Placing the same
-    quote twice (double tap) returns the first order and charges once."""
+    quote twice (double tap) returns the first order and charges once; the same
+    quote with other beneficiary details is refused (Conflict)."""
     name = (beneficiary_name or "").strip()
     id_number = (beneficiary_id or "").strip()
     if not name or not id_number:
@@ -361,6 +385,12 @@ def place_order(conn, customer_id, quote_id, beneficiary_name, beneficiary_id, *
         existing = conn.execute("SELECT * FROM orders WHERE quote_id = ?",
                                 (quote_id,)).fetchone()
         if existing:
+            # A retry must be the same order: other beneficiary details would be
+            # silently dropped if we answered with the first one.
+            if (existing["beneficiary_name"], existing["beneficiary_id"]) != \
+                    (name, id_number):
+                raise L.Conflict("this quote was already used for an order to another "
+                                 "beneficiary; get a new quote")
             return dict(existing)
         if now >= datetime.fromisoformat(q["expires_at"]):
             raise QuoteExpired("price expired, get a new one")
@@ -383,15 +413,21 @@ def place_order(conn, customer_id, quote_id, beneficiary_name, beneficiary_id, *
 # ---------- admin side ----------
 
 def assign_supplier(conn, order_id, supplier_id, *, admin_id, rate=None, now=None):
-    """Give the order to a supplier and lock what they charge for it: `rate` if
-    given (a one-off deal), otherwise their current agreed rate for the currency.
-    Can be called again to move an unpaid order to another supplier."""
+    """Give a placed order to a supplier and lock what they charge for it: `rate`
+    if given (a one-off deal), otherwise their current agreed rate for the
+    currency. An order already with a supplier is refused: unassign_supplier it
+    first (with a reason, after checking they have not paid). Refused while the
+    worker is blocked."""
     r = None if rate is None else _decimal(rate, 6, "rate")
     with L._write(conn):
         L._require_admin(conn, admin_id)
         o = _get_order(conn, order_id)
-        if o["status"] not in ("placed", "assigned"):
+        if o["status"] == "assigned":
+            raise L.Conflict("order is already with a supplier: check they have not "
+                             "paid, unassign it with a reason, then assign it again")
+        if o["status"] != "placed":
             raise L.LedgerError(f"order is {o['status']}")
+        _customer_not_blocked(conn, o)
         if not conn.execute("SELECT 1 FROM suppliers WHERE id = ? AND active = 1",
                             (supplier_id,)).fetchone():
             raise L.LedgerError("supplier not found")
@@ -409,8 +445,11 @@ def assign_supplier(conn, order_id, supplier_id, *, admin_id, rate=None, now=Non
                rate=str(r), supplier_cost=supplier_cost)
 
 
-def mark_paid(conn, receipt_code, payout_ref, *, admin_id, now=None):
-    """Record that the supplier paid the beneficiary. Works once per order."""
+def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, now=None):
+    """Record that the supplier paid the beneficiary. Works once per order.
+    `supplier_id`, if given, is the supplier whose confirmation this is: refused
+    (Conflict) if the order is with another supplier by now. Refused while the
+    worker is blocked."""
     ref = (payout_ref or "").strip()
     if not ref:
         raise L.LedgerError("the supplier's confirmation reference is required")
@@ -425,6 +464,10 @@ def mark_paid(conn, receipt_code, payout_ref, *, admin_id, now=None):
             raise L.LedgerError("assign a supplier first")
         if o["status"] != "assigned":
             raise L.LedgerError(f"order is already {o['status']}")
+        if supplier_id is not None and o["supplier_id"] != supplier_id:
+            raise L.Conflict("this order is with another supplier now: check which "
+                             "supplier paid it before marking it paid")
+        _customer_not_blocked(conn, o)
         margin = o["cost"] - o["supplier_cost"]
         txn = L._post(conn, "payout",
                       [(L._system(conn, "SYS_ORDERS"), -o["cost"]),
@@ -435,7 +478,7 @@ def mark_paid(conn, receipt_code, payout_ref, *, admin_id, now=None):
             "UPDATE orders SET status = 'paid', payout_ref = ?, paid_at = ?, "
             "payout_txn_id = ? WHERE id = ?", (ref, _now(now).isoformat(), txn, o["id"]))
         L._log(conn, admin_id, "mark_paid", o["id"], receipt=code, payout_ref=ref,
-               margin=margin)
+               supplier_id=o["supplier_id"], margin=margin)
         return txn
 
 
@@ -478,17 +521,18 @@ def supplier_statement(conn, supplier_id, limit=50):
 
 def margin_report(conn, since=None, until=None):
     """Paid orders with paid_at in [since, until), per currency and supplier:
-    orders, foreign total, charged to workers, supplier cost and margin (dirhams)."""
+    orders, foreign total, charged to workers, supplier cost and margin (dirhams).
+    A since/until without a time zone is UTC."""
     sql = ("SELECT o.currency, o.supplier_id, s.name AS supplier, "
            "o.foreign_amount, o.cost, o.supplier_cost "
            "FROM orders o JOIN suppliers s ON s.id = o.supplier_id WHERE o.status = 'paid'")
     args = []
     if since is not None:
         sql += " AND o.paid_at >= ?"
-        args.append(since.astimezone(timezone.utc).isoformat())
+        args.append(_utc(since).isoformat())
     if until is not None:
         sql += " AND o.paid_at < ?"
-        args.append(until.astimezone(timezone.utc).isoformat())
+        args.append(_utc(until).isoformat())
     totals = {}
     for o in conn.execute(sql + " ORDER BY o.currency, o.supplier_id", args):
         row = totals.setdefault((o["currency"], o["supplier_id"]), {
@@ -523,8 +567,10 @@ def unassign_supplier(conn, order_id, *, admin_id, reason, now=None):
 
 
 def cancel_order(conn, order_id, *, admin_id, reason, now=None):
-    """Cancel an order no supplier has yet and return the LYD to the worker.
-    For an order with a supplier, unassign_supplier first."""
+    """Cancel an order no supplier has yet and return the LYD to the worker
+    (also while they are blocked: it stays frozen on their balance). For an
+    order with a supplier, unassign_supplier first. The reason is for admins:
+    the worker's statement shows only that the order was cancelled."""
     with L._write(conn):
         L._require_admin(conn, admin_id)
         o = _get_order(conn, order_id)
@@ -550,37 +596,43 @@ def find_by_receipt(conn, receipt_code):
 # ---------- checks ----------
 
 def verify(conn):
-    """Ledger check plus order check. Empty list = healthy."""
-    problems = L.verify_ledger(conn)
-    held = L.account_balance(conn, "SYS_ORDERS")
-    open_total = conn.execute(
-        "SELECT COALESCE(SUM(cost), 0) FROM orders WHERE status IN ('placed','assigned')"
-    ).fetchone()[0]
-    if held != open_total:
-        problems.append(f"orders account holds {held} but open orders total {open_total}")
-    margin = L.account_balance(conn, "SYS_MARGIN")
-    paid_margin = conn.execute(
-        "SELECT COALESCE(SUM(cost - supplier_cost), 0) FROM orders WHERE status = 'paid'"
-    ).fetchone()[0]
-    if margin != paid_margin:
-        problems.append(f"margin account holds {margin} but paid orders made {paid_margin}")
-    for s in conn.execute(
-            "SELECT s.id, COALESCE((SELECT SUM(supplier_cost) FROM orders o "
-            " WHERE o.supplier_id = s.id AND o.status = 'paid'), 0) AS owed_for_orders, "
-            "COALESCE((SELECT -SUM(e.amount) FROM entries e JOIN transactions t "
-            " ON t.id = e.txn_id WHERE e.account_id = a.id AND t.kind <> 'payout'), 0) "
-            " AS paid, "
-            "COALESCE((SELECT SUM(e.amount) FROM entries e WHERE e.account_id = a.id), 0) "
-            " AS balance "
-            "FROM suppliers s JOIN accounts a ON a.code = 'SUP_' || s.id"):
-        if s["balance"] != s["owed_for_orders"] - s["paid"]:
-            problems.append(f"supplier {s['id']} balance {s['balance']} does not match "
-                            f"orders {s['owed_for_orders']} minus payments {s['paid']}")
-    for o in conn.execute(
-            "SELECT o.id, o.status, EXISTS (SELECT 1 FROM transactions t "
-            "WHERE t.reverses_txn_id = o.charge_txn_id) AS reversed FROM orders o"):
-        if o["status"] == "cancelled" and not o["reversed"]:
-            problems.append(f"order {o['id']} is cancelled but was not refunded")
-        if o["status"] != "cancelled" and o["reversed"]:
-            problems.append(f"order {o['id']} was refunded but is still {o['status']}")
-    return problems
+    """Ledger check plus order check. Empty list = healthy. It all reads one
+    snapshot, so orders placed or paid meanwhile can't show as a mismatch."""
+    with L._read(conn):
+        problems = L.verify_ledger(conn)
+        held = L.account_balance(conn, "SYS_ORDERS")
+        open_total = conn.execute(
+            "SELECT COALESCE(SUM(cost), 0) FROM orders "
+            "WHERE status IN ('placed','assigned')").fetchone()[0]
+        if held != open_total:
+            problems.append(f"orders account holds {held} but open orders total "
+                            f"{open_total}")
+        margin = L.account_balance(conn, "SYS_MARGIN")
+        paid_margin = conn.execute(
+            "SELECT COALESCE(SUM(cost - supplier_cost), 0) FROM orders "
+            "WHERE status = 'paid'").fetchone()[0]
+        if margin != paid_margin:
+            problems.append(f"margin account holds {margin} but paid orders made "
+                            f"{paid_margin}")
+        for s in conn.execute(
+                "SELECT s.id, COALESCE((SELECT SUM(supplier_cost) FROM orders o "
+                " WHERE o.supplier_id = s.id AND o.status = 'paid'), 0) "
+                " AS owed_for_orders, "
+                "COALESCE((SELECT -SUM(e.amount) FROM entries e JOIN transactions t "
+                " ON t.id = e.txn_id WHERE e.account_id = a.id AND t.kind <> 'payout'), "
+                " 0) AS paid, "
+                "COALESCE((SELECT SUM(e.amount) FROM entries e "
+                " WHERE e.account_id = a.id), 0) AS balance "
+                "FROM suppliers s JOIN accounts a ON a.code = 'SUP_' || s.id"):
+            if s["balance"] != s["owed_for_orders"] - s["paid"]:
+                problems.append(f"supplier {s['id']} balance {s['balance']} does not match "
+                                f"orders {s['owed_for_orders']} minus payments {s['paid']}")
+        for o in conn.execute(
+                "SELECT o.id, o.status, EXISTS (SELECT 1 FROM transactions t "
+                "WHERE t.reverses_txn_id = o.charge_txn_id) AS reversed FROM orders o"):
+            if o["status"] == "cancelled" and not o["reversed"]:
+                problems.append(f"order {o['id']} is cancelled but was not refunded")
+            if o["status"] != "cancelled" and o["reversed"]:
+                problems.append(f"order {o['id']} was refunded but is still "
+                                f"{o['status']}")
+        return problems

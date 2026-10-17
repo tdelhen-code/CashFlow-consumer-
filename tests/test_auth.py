@@ -269,6 +269,28 @@ class ApiTests(unittest.TestCase):
         with self.assertRaises(L.LedgerError):     # Ali's quote, Sam's session
             api.place_order(self.db, sam_t, quote["quote_id"], "X", "1")
 
+    def test_statement_shows_no_admin_reasons(self):
+        aid = api.admin_id(self.db, self.admin_t)
+        O.add_currency(self.db, "USD", admin_id=aid)
+        O.set_price(self.db, "USD", "7.85", admin_id=aid)
+        supplier = O.add_supplier(self.db, "Cairo agent", admin_id=aid)
+        O.set_supplier_price(self.db, supplier, "USD", "7.80", admin_id=aid)
+        quote = api.get_quote(self.db, self.ali_t, "USD", "10")
+        order = api.place_order(self.db, self.ali_t, quote["quote_id"], "Ahmed", "A1")
+        O.assign_supplier(self.db, order["id"], supplier, admin_id=aid)
+        O.unassign_supplier(self.db, order["id"], admin_id=aid,
+                            reason="Cairo agent confirmed not paid")
+        O.cancel_order(self.db, order["id"], admin_id=aid,
+                       reason="Cairo agent could not pay at 7.80")
+        sent = api.send_money(self.db, self.ali_t, "0922222222", "5", idempotency_key="s1")
+        L.reverse(self.db, sent["txn_id"], admin_id=aid, reason="Cairo agent asked for it")
+        rows = api.my_statement(self.db, self.ali_t)
+        self.assertEqual([r["note"] for r in rows if r["kind"] == "reversal"],
+                         ["Correction by admin", "Order cancelled"])
+        self.assertFalse([r for r in rows if "Cairo" in repr(r)])
+        admin_view = L.account_statement(self.db, f"CUS_{self.ali}")
+        self.assertIn("Cairo agent could not pay at 7.80", [r["note"] for r in admin_view])
+
     def test_me_and_statement(self):
         self.assertEqual(api.me(self.db, self.ali_t)["balance"]["lyd"], "100.000")
         rows = api.my_statement(self.db, self.ali_t)

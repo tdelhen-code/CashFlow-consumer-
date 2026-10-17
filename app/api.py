@@ -44,7 +44,19 @@ def my_statement(conn, token, limit=50):
     for row in rows:
         row["amount_lyd"] = L.format_lyd(row["amount"])
         row["balance_after_lyd"] = L.format_lyd(row["balance_after"])
+        if row["kind"] == "reversal":
+            row["note"] = _reversal_note(conn, row["txn_id"])
     return rows
+
+
+def _reversal_note(conn, txn_id):
+    """What a worker sees for a cancelled order or a correction, instead of the
+    admin's reason, which can name a supplier or a rate. The reason stays in
+    the admin log and on the admin's view of the account."""
+    row = conn.execute(
+        "SELECT r.kind FROM transactions t JOIN transactions r ON r.id = t.reverses_txn_id "
+        "WHERE t.id = ?", (txn_id,)).fetchone()
+    return "Order cancelled" if row and row["kind"] == "order" else "Correction by admin"
 
 
 # ---------- worker: sending ----------

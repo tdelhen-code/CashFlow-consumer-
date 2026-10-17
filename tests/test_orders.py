@@ -1,6 +1,9 @@
+import os
 import sqlite3
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from app import ledger as L
 from app import orders as O
@@ -86,6 +89,38 @@ class OrderTests(unittest.TestCase):
         b = O.place_order(self.db, self.ali, q["quote_id"], "Ahmed", "A1", now=T0)
         self.assertEqual(a["receipt_code"], b["receipt_code"])
         self.assertEqual(L.balance(self.db, self.ali), lyd("215"))
+
+    def test_same_quote_for_another_beneficiary_is_refused(self):
+        q = O.get_quote(self.db, self.ali, "USD", "100", now=T0)
+        first = O.place_order(self.db, self.ali, q["quote_id"], "Ahmed Salh", "A12345",
+                              now=T0)
+        for name, id_number in (("Ahmed Saleh", "A12345"), ("Ahmed Salh", "A123456")):
+            with self.assertRaises(L.Conflict):
+                O.place_order(self.db, self.ali, q["quote_id"], name, id_number, now=T0)
+        again = O.place_order(self.db, self.ali, q["quote_id"], " Ahmed Salh ", "A12345",
+                              now=T0 + timedelta(minutes=30))     # a late retry is fine
+        self.assertEqual(again["receipt_code"], first["receipt_code"])
+        self.assertEqual(L.balance(self.db, self.ali), lyd("215"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM orders").fetchone()[0], 1)
+
+    def test_amounts_and_rates_are_stored_in_one_plain_form(self):
+        for typed, places, stored in (("1E+1", 2, "10.00"), ("10.0", 2, "10.00"),
+                                      ("0.5", 2, "0.50"), ("1E+12", 2, "1000000000000.00"),
+                                      ("785E-2", 6, "7.85"), ("7.850000", 6, "7.85"),
+                                      ("0.1534", 6, "0.1534"), ("0.000001", 6, "0.000001")):
+            self.assertEqual(str(O._decimal(typed, places, "x")), stored, typed)
+        O.set_price(self.db, "USD", "785E-2", admin_id=self.admin, now=T0)
+        q = O.get_quote(self.db, self.ali, "USD", "1e1", now=T0)
+        self.assertEqual((q["amount"], q["rate"], q["cost"]), ("10.00", "7.85", lyd("78.5")))
+        o = O.place_order(self.db, self.ali, q["quote_id"], "Ahmed", "A1", now=T0)
+        O.assign_supplier(self.db, o["id"], self.supplier, admin_id=self.admin,
+                          rate="0.78E1")
+        row = O.find_by_receipt(self.db, o["receipt_code"])
+        self.assertEqual((row["foreign_amount"], row["rate"], row["supplier_rate"]),
+                         ("10.00", "7.85", "7.80"))
+        O.set_supplier_price(self.db, self.supplier, "EGP", "0.1500", admin_id=self.admin)
+        self.assertEqual(O.current_supplier_price(self.db, self.supplier, "EGP")["rate"],
+                         "0.15")
 
     def test_cannot_use_someone_elses_quote(self):
         q = O.get_quote(self.db, self.ali, "USD", "10", now=T0)
@@ -181,6 +216,34 @@ class OrderTests(unittest.TestCase):
         o = self.order()
         L._reverse(self.db, o["charge_txn_id"], self.admin, "bypass")
         self.assertTrue(O.verify(self.db))
+
+    def test_verify_reads_one_snapshot_while_others_write(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "wallet.db")
+        db, other = O.connect(path), O.connect(path)     # two server threads
+        self.addCleanup(db.close)
+        self.addCleanup(other.close)
+        admin = L.create_user(db, "admin", "Admin", "0910000000")
+        ali = L.create_user(db, "customer", "Ali", "0911111111", admin_id=admin)
+        L.deposit(db, ali, lyd("1000"), admin_id=admin, into="BANK")
+        O.add_currency(db, "USD", admin_id=admin)
+        O.set_price(db, "USD", "7.85", admin_id=admin, now=T0)
+        q = O.get_quote(db, ali, "USD", "100", now=T0)
+        real_balance = L.account_balance
+
+        def order_placed_meanwhile(conn, code):
+            # the other connection commits an order just after SYS_ORDERS is read
+            result = real_balance(conn, code)
+            if code == "SYS_ORDERS":
+                O.place_order(other, ali, q["quote_id"], "Ahmed", "A1", now=T0)
+            return result
+
+        with mock.patch.object(L, "account_balance", order_placed_meanwhile):
+            self.assertEqual(O.verify(db), [])
+        self.assertEqual(L.account_balance(db, "SYS_ORDERS"), lyd("785"))
+        self.assertEqual(O.verify(db), [])
+        self.assertFalse(db.in_transaction)
 
     def test_huge_foreign_amounts_are_refused_cleanly(self):
         for amount in ("1e30", "1e999999", "2e15"):
