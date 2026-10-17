@@ -5,7 +5,8 @@
   code (given in person or by WhatsApp); the worker uses it to choose their own
   password. The same is used when a password is forgotten. The admin sees the
   code, so issuing it and using it are both written to the admin log, and a
-  code for an admin's account needs a reason.
+  code for an admin's account needs a reason. A code stops working once the
+  admin who issued it is blocked or deactivated.
 - Passwords and setup codes are stored with salted scrypt, slow to guess even
   from a copy of the database; session tokens are stored only as hashes, so a
   copy of the database can't be used to log in.
@@ -15,9 +16,9 @@
   can't lock its owner out. 50 wrong tries within 15 minutes from all clients
   together lock it for every client that never gave its right password, so
   guessing spread over many addresses stays slow while the owner can still log
-  in from where they did before. An unknown phone, a wrong password and a
-  locked account get the same answer. A right setup code still works and lifts
-  every lock; so can an admin.
+  in from where they did before (with the password or a setup code). An
+  unknown phone, a wrong password and a locked account get the same answer. A
+  right setup code still works and lifts every lock; so can an admin.
 - A blocked or deactivated user can't log in, and their open sessions stop
   working at once. Changing or resetting a password ends the other sessions.
 """
@@ -346,18 +347,28 @@ def issue_setup_code(conn, user_id, *, admin_id, reason=None, now=None):
     return "-".join(code[i:i + 4] for i in range(0, len(code), 4))
 
 
+# A setup code works only while the admin who issued it still could: one
+# issued by an admin blocked or deactivated since is dead (block_user and
+# deactivate_user also cancel them, so unblocking doesn't bring them back).
+_ISSUER_IS_ADMIN = ("EXISTS (SELECT 1 FROM users a WHERE a.id = setup_codes.issued_by "
+                    "AND a.role = 'admin' AND a.active = 1 AND a.blocked = 0)")
+
+
 def set_password_with_code(conn, phone, code, new_password, *, now=None, client=None):
     """Worker chooses their password with the setup code. Logs them in:
     returns a session token. A right code works even while the phone is
-    locked by wrong tries, and lifts every lock; a wrong one counts as a
-    wrong try from `client` (the web: the address)."""
+    locked by wrong tries, and lifts every lock; `client` (the web: the
+    address) then counts as one that gave the right password. A wrong one
+    counts as a wrong try from `client`. A code stops working when the admin
+    who issued it is blocked or deactivated."""
     now = _now(now)
     phone = _login_phone(phone)
     _check_password_rules(new_password, phone)      # first: a refusal says nothing about the code
     user = phone and conn.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
     issued = user and conn.execute(
         "SELECT id, code_hash, issued_by FROM setup_codes WHERE user_id = ? "
-        "AND used_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1",
+        f"AND used_at IS NULL AND expires_at > ? AND {_ISSUER_IS_ADMIN} "
+        "ORDER BY id DESC LIMIT 1",
         (user["id"], now.isoformat())).fetchone()
     # One slow check whether or not the phone and a code exist, so the time
     # taken doesn't tell who is registered.
@@ -371,9 +382,11 @@ def set_password_with_code(conn, phone, code, new_password, *, now=None, client=
     with L._write(conn):
         used = valid and conn.execute(
             "UPDATE setup_codes SET used_at = ? WHERE id = ? AND used_at IS NULL "
-            "AND expires_at > ?", (now.isoformat(), issued["id"], now.isoformat())
-        ).rowcount == 1
+            f"AND expires_at > ? AND {_ISSUER_IS_ADMIN}",
+            (now.isoformat(), issued["id"], now.isoformat())).rowcount == 1
         _record_attempt(conn, phone, used, now, None if used else client)
+        if used and client is not None:     # where they chose it: a known address
+            _record_attempt(conn, phone, True, now, client)
         if used:
             current = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
             _check_can_use(current)                 # not blocked or closed meanwhile

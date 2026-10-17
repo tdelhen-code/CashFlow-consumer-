@@ -7,8 +7,11 @@ other, and order foreign currency paid from their balance.
   commission, bank and till accounts, reversals, admin log, hourly checks and
   reconciliation:
   - the checks (`verify_ledger`, and `orders.verify` which adds the order
-    checks) read one snapshot of the database, so they can run while the app is
-    in use without reporting differences that aren't there;
+    checks) and `reconcile` read one snapshot of the database, so they can run
+    while the app is in use without reporting differences that aren't there
+    (such as a move between the bank and a till counted in neither or both);
+  - `admin_log` reads the admin log back, newest first, optionally only one
+    action or one target (`GET /api/admin/log`);
   - an idempotency key, when given, must be non-empty text (at most 200
     characters, spaces around it ignored); a blank key is refused, never taken
     as "no key";
@@ -26,7 +29,14 @@ other, and order foreign currency paid from their balance.
   - each supplier has an agreed rate per currency (`set_supplier_price`), locked
     onto an order when it is assigned (or a one-off `rate=` for that order);
   - `mark_paid` can be given the `supplier_id` whose confirmation it is: it is
-    refused as a conflict if the order is with another supplier by then;
+    refused as a conflict if the order is with another supplier by then. An
+    order without a supplier (unassigned on the supplier's word that it had not
+    paid, then it sends proof that it did) is marked paid only with that
+    `supplier_id`: its agreed rate (or a one-off `rate=`) is locked on in the
+    same step;
+  - `set_supplier_active` switches a supplier off or on, with a logged reason.
+    While off, no order can be assigned to it; its orders already assigned can
+    still be marked paid or unassigned, and it can still be paid;
   - marking an order paid moves its cost out of `SYS_ORDERS`: the supplier's cost
     to the supplier's account `SUP_<id>` (what we owe them) and the rest to
     `SYS_MARGIN`;
@@ -44,37 +54,44 @@ other, and order foreign currency paid from their balance.
   - `set_currency_active` switches a currency off or on, with a logged reason.
     While off, workers don't see it and can't get quotes or place orders for it,
     even on quotes taken before; orders already placed are not touched. Its price
-    can still be set while it is off.
+    and the suppliers' agreed rates for it can still be set while it is off, so
+    the orders already placed are assigned at what the supplier charges now.
 
 Users (in `app/ledger.py`):
 - phone numbers must be Libyan mobiles and are stored as `+2189XXXXXXXX` however
   they are typed (`find_user_by_phone`): spaces, dashes, dots, brackets and the
-  invisible direction marks of a number copied from Arabic text are ignored, and
-  Arabic-Indic or Persian digits (`٠٩١ ١٢٣ ٤٥٦٧`) are read as 0-9; any other
+  invisible direction marks of a number copied from Arabic text (the Arabic
+  letter mark among them) are ignored, and Arabic-Indic or Persian digits
+  (`٠٩١ ١٢٣ ٤٥٦٧`) are read as 0-9; any other
   character (digits of other scripts, `²`) is refused. A number already
   registered, however it is typed, is refused as a conflict. An optional
   WhatsApp number can be from any country (`set_whatsapp`), read the same way
   and stored as `+<country code><number>`;
 - `block_user` / `unblock_user` freeze a worker while a problem or suspicion is
   checked: no sending, receiving, quotes, orders or cash, but salary and deposits
-  still arrive; a blocked admin loses admin rights. Their open orders are held:
-  no supplier can be assigned until they are unblocked (the admin's order list
-  shows `customer_blocked`). An admin can still unassign (with a reason) and
+  still arrive; a blocked admin loses admin rights, and the setup codes they
+  issued that nobody has used yet stop working, for good (also after an
+  unblock; the admin log lists whose they were, who then need a new code from
+  another admin). Their open orders are held: no supplier can be assigned
+  until they are unblocked (the admin's order list shows
+  `customer_blocked`). An admin can still unassign (with a reason) and
   cancel, which refunds to the frozen balance. A payout the supplier already
   made is still recorded with `mark_paid` (the worker's balance doesn't change;
-  the admin log notes the block): never cancel an order the supplier has paid;
+  the admin log notes the block), also on an order unassigned meanwhile, with
+  that `supplier_id`: never cancel an order the supplier has paid;
 - `deactivate_user` / `reactivate_user` for workers who leave: only at a zero
-  balance with no unfinished orders. A reversal that would touch a deactivated
-  worker's account is refused (reactivate them first), and the checks report
-  any money left on a deactivated account.
+  balance with no unfinished orders. Deactivating an admin also stops the
+  setup codes they issued, like blocking. A reversal that would touch a
+  deactivated worker's account is refused (reactivate them first), and the
+  checks report any money left on a deactivated account.
 
 An order with a supplier can't be cancelled or given to another supplier
 directly (refused as a conflict): `unassign_supplier` first, with a reason
 (after checking with the supplier that it wasn't paid), then `cancel_order` or
 `assign_supplier` again. A paid or cancelled order can't be changed.
-Cancel and unassign reasons are for admins (admin log, admin statements): the
-worker's statement shows a reversal only as "Order cancelled" or, for an
-`/api/admin/reverse`, "Correction by admin".
+Cancel and unassign reasons are for admins (admin log, `GET /api/admin/log`,
+admin statements): the worker's statement shows a reversal only as "Order
+cancelled" or, for an `/api/admin/reverse`, "Correction by admin".
 
 Login (`app/auth.py`) and what the web app calls (`app/api.py`):
 - log in with phone (any usual form) and password. A password has at least 10
@@ -98,9 +115,12 @@ Login (`app/auth.py`) and what the web app calls (`app/api.py`):
   it and act as the worker (or as another admin). This can't be ruled out while
   admins hand out codes. Instead, issuing a code and using it are both in the
   admin log (who issued it and when; its use is logged under the issuing
-  admin), and a code for an admin's account needs a reason. A worker whose code
-  was already used, or who is logged out unexpectedly, must report it. Later:
-  a second admin approves resetting an admin's account;
+  admin; `GET /api/admin/log?action=issue_setup_code&target=<user id>`), and a
+  code for an admin's account needs a reason. A worker whose code was already
+  used, or who is logged out unexpectedly, must report it. Blocking or
+  deactivating an admin stops every code they issued that nobody has used yet,
+  so a suspected or departed admin can't use one. Later: a second admin
+  approves resetting an admin's account;
 - 5 wrong tries in a row (password, setup code, or the current password when
   changing it) from one address (IPv6: one /64) lock that phone number for 15
   minutes from that address, registered or not; the owner can still log in
@@ -108,11 +128,11 @@ Login (`app/auth.py`) and what the web app calls (`app/api.py`):
   50 wrong tries within 15 minutes from all addresses together lock it for
   every address that never gave its right password, so guessing spread over
   many addresses stays slow while the owner can still log in from where they
-  did before. That is the trade-off: someone with many addresses can still
-  lock a phone for every address its owner hasn't logged in from, and an admin
-  then lifts it. An unknown phone, a wrong password and a locked account get
-  the same answer and the same slow check, so login can't be used to find out
-  who has an account. A right setup code still works while locked and lifts
+  did before (with their password or a setup code). That is the trade-off:
+  someone with many addresses can still lock a phone for every address its
+  owner hasn't logged in from, and an admin then lifts it. An unknown phone, a
+  wrong password and a locked account get the same answer and the same slow
+  check, so login can't be used to find out who has an account. A right setup code still works while locked and lifts
   every lock; an admin can lift them too (`unlock_login`, with a reason,
   logged). `login`, `set_password_with_code` and `change_password` take the
   address as `client=`;
@@ -150,14 +170,21 @@ Run it locally (plain http, so the cookie is allowed without HTTPS):
 
 The bundled server handles requests on 8 threads, each keeping its database
 connection from one request to the next, and lets go of a client that sends
-nothing for 30 seconds.
+nothing for 30 seconds or whose request hasn't fully arrived within 30
+seconds. It is for local testing only: don't make it reachable by others.
 
 In production, serve `make_app("/path/wallet.db", trust_proxy=True)` with a WSGI
 server (waitress, gunicorn) behind HTTPS (nginx, Caddy) that sets
 `X-Forwarded-For`; without `trust_proxy` every client looks like the proxy, so
-they all share one login limit. JSON in and out; POSTs must be
-`Content-Type: application/json` (else 415) with a plain `Content-Length` of at
-most 64 KiB (a negative or non-numeric one is a 400, a larger one a 413; none
+they all share one login limit. Waitress drops that header unless it is told to
+trust the proxy: `waitress.serve(application, trusted_proxy="127.0.0.1",
+trusted_proxy_headers="x-forwarded-for")`, or `waitress-serve
+--trusted-proxy=127.0.0.1 --trusted-proxy-headers=x-forwarded-for
+wsgi:application` (with the proxy's address); gunicorn passes it on as it is.
+With `trust_proxy`, a request without the header counts for the address it
+came from, and the first one is reported on stderr. JSON in and out; POSTs
+must be `Content-Type: application/json` (else 415) with a plain
+`Content-Length` of at most 64 KiB (a negative or non-numeric one is a 400, a larger one a 413; none
 means an empty body). The session is the HttpOnly, Secure, SameSite=Strict
 cookie `__Host-session` (plain `session` with `--insecure-cookies`), found among
 any other cookies the browser sends, or `Authorization: Bearer <token>`. A
@@ -188,14 +215,14 @@ and a `quote_id` is the text `/api/quote` returned. Currency codes are read in
 any case (`usd` is `USD`). An optional field (marked `?` below) sent as `""` or
 only spaces counts as left out: no WhatsApp number, the agreed rate on assign,
 no fee (but not `idempotency_key`, see below). Lists (`/api/statement`,
-`/api/orders`, the admin statements and `/api/admin/orders`) take `?limit=`
-(default 50, at most 200). `.../whatsapp` needs its field: `null` or `""`
+`/api/orders`, the admin statements, `/api/admin/orders` and
+`/api/admin/log`) take `?limit=` (default 50, at most 200). `.../whatsapp` needs its field: `null` or `""`
 removes the number, and a body without it is a 400 that changes nothing.
 
 Errors: `{"error", "type"}` with 400 (bad input: a field missing, of the wrong
-type or too long, or a rule not met, such as a currency that isn't offered, an
-order that is already paid or cancelled, or an idempotency key reused with
-other details), 401 (log in; also a wrong or unknown login, a locked one, or a
+type or too long, or a rule not met, such as a currency that isn't offered, a
+supplier switched off, an order that is already paid or cancelled, or an
+idempotency key reused with other details), 401 (log in; also a wrong or unknown login, a locked one, or a
 session ended by blocking, deactivating or a new setup code), 403 (not allowed /
 blocked: a worker on an admin route or an admin on a worker's one, a blocked
 user logging in, a blocked worker's order, an admin blocked or deactivated
@@ -228,9 +255,9 @@ missing key (where required) or a blank one is a 400.
 |---|---|
 | Everyone | `POST /api/login` (`{phone, password}`), `/api/setup-password` (`{phone, code, password}`), `/api/logout` (this session), `/api/logout-everywhere` (every session of this user), `/api/change-password` (`{old_password, new_password}`; ends the other sessions) |
 | Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id}`) |
-| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`; `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `ar` (default), `en` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
+| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; both filters optional); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `ar` (default), `en` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
 | Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` |
-| Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?}`); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
+| Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/active` (`{active: true/false, reason}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?, rate?}`; an order without a supplier needs `supplier_id`, and `rate` is a one-off rate for it); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
 
 Not built yet: suppliers paid in foreign currency instead of LYD, approvals
 (such as a second admin approving a reset of an admin's account), screens

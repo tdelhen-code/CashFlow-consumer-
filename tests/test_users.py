@@ -36,7 +36,8 @@ class PhoneTests(unittest.TestCase):
         # as pasted from right-to-left text (direction marks, other dashes).
         for typed in ("٠٩١٢٣٤٥٦٧٨", "۰۹۱۲۳۴۵۶۷۸", "٠٩١ ٢٣٤ ٥٦٧٨", "+٢١٨ ٩١ ٢٣٤ ٥٦٧٨",
                       "091234567٨", "091\u2013234\u20135678", "091\u00a0234\u00a05678",
-                      "\u202a+218 91 234 5678\u202c", "\u200e0912345678"):
+                      "\u202a+218 91 234 5678\u202c", "\u200e0912345678",
+                      "\u061c0912345678", "\u061c+218 91 234 5678"):  # the Arabic letter mark
             self.assertEqual(L.normalize_phone(typed), "+218912345678", ascii(typed))
         # Any other non-ASCII character, digits from other scripts included,
         # is refused rather than stored as it was typed.
@@ -157,6 +158,39 @@ class UserTests(unittest.TestCase):
         logged = self.db.execute(
             "SELECT details FROM admin_log WHERE action = 'mark_paid'").fetchone()[0]
         self.assertIs(json.loads(logged)["customer_blocked"], True)
+        with self.assertRaises(L.AccountBlocked):
+            L.transfer(self.db, self.ali, self.sam, lyd("1"))
+        self.assertEqual(O.verify(self.db), [])
+
+    def test_a_payout_on_an_order_unassigned_meanwhile_is_recorded_while_blocked(self):
+        # The supplier said it had not paid, so the order was unassigned; then it
+        # sends proof that it had. The payout is recorded with that supplier,
+        # without unblocking the worker, and nothing tells the admin to cancel
+        # (a refund of money that has already left).
+        supplier = O.add_supplier(self.db, "Cairo agent", admin_id=self.admin)
+        O.set_supplier_price(self.db, supplier, "USD", "7.00", admin_id=self.admin)
+        o = self.order("10")
+        O.assign_supplier(self.db, o["id"], supplier, admin_id=self.admin)
+        L.block_user(self.db, self.ali, admin_id=self.admin, reason="doubt")
+        O.unassign_supplier(self.db, o["id"], admin_id=self.admin,
+                            reason="Cairo says it has not paid")
+        with self.assertRaises(L.AccountBlocked) as caught:
+            O.assign_supplier(self.db, o["id"], supplier, admin_id=self.admin)
+        self.assertNotIn("cancel", str(caught.exception))
+        with self.assertRaises(L.LedgerError):          # whose payout it was is needed
+            O.mark_paid(self.db, o["receipt_code"], "PAY-77", admin_id=self.admin)
+        before = L.balance(self.db, self.ali)
+        O.mark_paid(self.db, o["receipt_code"], "PAY-77", admin_id=self.admin,
+                    supplier_id=supplier)
+        paid = O.find_by_receipt(self.db, o["receipt_code"])
+        self.assertEqual((paid["status"], paid["supplier_id"], paid["supplier_rate"],
+                          paid["supplier_cost"]), ("paid", supplier, "7.00", lyd("70")))
+        self.assertEqual(L.balance(self.db, self.ali), before)      # still frozen, untouched
+        self.assertEqual(O.supplier_balance(self.db, supplier), lyd("70"))
+        logged = json.loads(self.db.execute(
+            "SELECT details FROM admin_log WHERE action = 'mark_paid'").fetchone()[0])
+        self.assertEqual((logged["customer_blocked"], logged["assigned_with_payout"]),
+                         (True, True))
         with self.assertRaises(L.AccountBlocked):
             L.transfer(self.db, self.ali, self.sam, lyd("1"))
         self.assertEqual(O.verify(self.db), [])

@@ -248,6 +248,15 @@ class AuthTests(unittest.TestCase):
             "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND ended_at IS NULL",
             (self.ali,)).fetchone()[0], 0)
 
+    def test_setup_code_is_refused_if_its_issuer_is_blocked_meanwhile(self):
+        clerk = L.create_user(self.db, "admin", "Clerk", "0930000000", admin_id=self.admin)
+        code = A.issue_setup_code(self.db, self.sam, admin_id=clerk, now=T0)
+        block = lambda: L.block_user(self.db, clerk, admin_id=self.admin, reason="doubt")
+        with self.meanwhile(block), self.assertRaises(A.LoginFailed):
+            A.set_password_with_code(self.db, "0922222222", code, "sam-pass-99", now=T0)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ?", (self.sam,)).fetchone()[0], 0)
+
     def test_using_a_setup_code_ends_every_other_session(self):
         code = A.issue_setup_code(self.db, self.ali, admin_id=self.admin, now=T0)
         ali = self.db.execute("SELECT * FROM users WHERE id = ?", (self.ali,)).fetchone()
@@ -421,6 +430,21 @@ class AuthTests(unittest.TestCase):
         for client in ("x0", "x2"):                     # a right code lifts every lock
             A.login(self.db, "0911111111", "brand-new-1", now=later, client=client)
 
+    def test_the_address_where_a_code_was_used_is_spared_by_everyones_lock(self):
+        # A new worker logs in with the code's session, maybe for days, before
+        # ever typing the password: where they chose it counts as their address.
+        home, cafe = "198.51.100.7", "198.51.100.8"
+        code = A.issue_setup_code(self.db, self.sam, admin_id=self.admin, now=T0)
+        A.set_password_with_code(self.db, "0922222222", code, "sam-pass-99", now=T0,
+                                 client=home)
+        for i in range(A.MAX_FAILED_LOGINS_EVERYWHERE):
+            with self.assertRaises(A.LoginFailed):
+                A.login(self.db, "0922222222", "wrong-password", now=T0,
+                        client=f"203.0.113.{i // A.MAX_FAILED_LOGINS}")
+        A.login(self.db, "0922222222", "sam-pass-99", now=T0, client=home)
+        with self.assertRaises(A.LoginFailed):          # an address Sam never used
+            A.login(self.db, "0922222222", "sam-pass-99", now=T0, client=cafe)
+
     # --- admins and setup codes ---
     def test_setup_codes_are_logged_and_need_a_reason_for_admins(self):
         boss = L.create_user(self.db, "admin", "Boss", "0930000000", admin_id=self.admin)
@@ -437,6 +461,49 @@ class AuthTests(unittest.TestCase):
                          [(self.admin, "issue_setup_code", "new office admin"),
                           (self.admin, "setup_code_used", None)])
         self.assertTrue(all(r["at"] for r in rows))
+
+    def new_admin(self, name, phone):
+        admin = L.create_user(self.db, "admin", name, phone, admin_id=self.admin)
+        code = A.issue_setup_code(self.db, admin, admin_id=self.admin, reason="new admin",
+                                  now=T0)
+        A.set_password_with_code(self.db, phone, code, f"{name}-pass-2026", now=T0)
+        return admin
+
+    def test_codes_a_blocked_or_departed_admin_issued_stop_working(self):
+        # Blocking or deactivating an admin must also stop the codes they still
+        # hold: as the worker, or as a new admin who would unblock them.
+        clerk = self.new_admin("Clerk", "0930000000")
+        ali_code = A.issue_setup_code(self.db, self.ali, admin_id=clerk, now=T0)
+        omar = L.create_user(self.db, "admin", "Omar", "0940000000", admin_id=clerk)
+        omar_code = A.issue_setup_code(self.db, omar, admin_id=clerk, reason="new admin",
+                                       now=T0)
+        L.block_user(self.db, clerk, admin_id=self.admin, reason="suspicious payouts")
+        L.unblock_user(self.db, clerk, admin_id=self.admin, reason="cleared")
+        for phone, code in (("0911111111", ali_code), ("0940000000", omar_code)):
+            with self.assertRaises(A.LoginFailed, msg=phone):   # also after the unblock
+                A.set_password_with_code(self.db, phone, code, "thief-pass-1", now=T0)
+        logged = self.db.execute("SELECT details FROM admin_log WHERE action = 'block_user'"
+                                 ).fetchone()[0]
+        self.assertEqual(json.loads(logged)["setup_codes_cancelled_for"], [self.ali, omar])
+
+        clerk2 = self.new_admin("Clerk2", "0950000000")
+        sam_code = A.issue_setup_code(self.db, self.sam, admin_id=clerk2, now=T0)
+        L.deactivate_user(self.db, clerk2, admin_id=self.admin, reason="left the company")
+        L.reactivate_user(self.db, clerk2, admin_id=self.admin, reason="came back")
+        with self.assertRaises(A.LoginFailed):
+            A.set_password_with_code(self.db, "0922222222", sam_code, "thief-pass-1", now=T0)
+        code = A.issue_setup_code(self.db, self.ali, admin_id=self.admin, now=T0)
+        A.set_password_with_code(self.db, "0911111111", code, "brand-new-1", now=T0)
+
+    def test_a_code_is_refused_while_its_issuer_is_blocked(self):
+        # Also when the code was not cancelled, as in a database from before.
+        clerk = self.new_admin("Clerk", "0930000000")
+        code = A.issue_setup_code(self.db, self.sam, admin_id=clerk, now=T0)
+        self.db.execute("UPDATE users SET blocked = 1 WHERE id = ?", (clerk,))
+        with self.assertRaises(A.LoginFailed):
+            A.set_password_with_code(self.db, "0922222222", code, "sam-pass-99", now=T0)
+        self.db.execute("UPDATE users SET blocked = 0 WHERE id = ?", (clerk,))
+        A.set_password_with_code(self.db, "0922222222", code, "sam-pass-99", now=T0)
 
     # --- password strength ---
     def test_common_passwords_and_phone_digits_are_refused(self):

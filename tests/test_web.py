@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import socket
 import tempfile
 import threading
 import time
@@ -266,6 +267,20 @@ class WebTests(unittest.TestCase):
         self.assertEqual(statement["balance"]["lyd"], "950.000")
 
     # --- admin setup: currencies, tills, suppliers ---
+    def test_a_bad_field_when_creating_a_user_creates_nothing(self):
+        # A 400 means nothing was done: no account without a code, which a
+        # corrected retry would only meet as "already registered".
+        for reason in (5, "x" * 501):
+            status, answer = self.admin.post("/api/admin/users", {
+                "name": "Omar", "phone": "0922222222", "reason": reason})
+            self.assertEqual((status, answer["type"]), (400, "http"), answer)
+        users = self.admin.get("/api/admin/users")[1]["users"]
+        self.assertEqual([u["name"] for u in users], ["Admin"])
+        status, made = self.admin.post("/api/admin/users", {
+            "name": "Omar", "phone": "0922222222", "reason": "new driver"})
+        self.assertEqual(status, 200, made)
+        self.assertRegex(made["setup_code"], r"^\w{4}-\w{4}-\w{4}$")
+
     def test_duplicate_or_bad_setup_is_refused_clearly(self):
         cases = [
             (("/api/admin/currencies", {"code": "usd"}), 200),
@@ -362,6 +377,30 @@ class WebTests(unittest.TestCase):
         self.assertEqual((status, answer["type"]), (403, "AccountBlocked"))
         self.assertEqual(self.admin.post(f"/api/admin/orders/{held['id']}/cancel",
                                          {"reason": "worker blocked"})[0], 200)
+        self.assertEqual(self.admin.get("/api/admin/health")[1]["problems"], [])
+
+    def test_a_payout_on_an_unassigned_order_of_a_blocked_worker_over_http(self):
+        ali_id, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        self.setup_orders(ali_id)
+        order = self.place(ali, amount="100")                  # 785 LYD
+        o = f"/api/admin/orders/{order['id']}"
+        self.assertEqual(self.admin.post(f"{o}/assign", {"supplier_id": 1})[0], 200)
+        self.assertEqual(self.admin.post(f"/api/admin/users/{ali_id}/block",
+                                         {"reason": "doubt"})[0], 200)
+        self.assertEqual(self.admin.post(f"{o}/unassign",
+                                         {"reason": "Cairo says it has not paid"})[0], 200)
+        status, answer = self.admin.post(f"{o}/assign", {"supplier_id": 1})
+        self.assertEqual((status, answer["type"]), (403, "AccountBlocked"))
+        self.assertNotIn("cancel", answer["error"])
+        paid = {"receipt_code": order["receipt_code"], "payout_ref": "PAY-77"}
+        self.assertEqual(self.admin.post("/api/admin/orders/paid", paid)[0], 400)
+        status, answer = self.admin.post("/api/admin/orders/paid",
+                                         dict(paid, supplier_id=1, rate="7.82"))
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(self.lyd(user_id=ali_id), "215.000")      # no refund, still frozen
+        status, done = self.admin.get("/api/admin/orders?status=paid")
+        self.assertEqual([(d["supplier_id"], d["supplier_cost"]) for d in done["orders"]],
+                         [(1, 782000)])
         self.assertEqual(self.admin.get("/api/admin/health")[1]["problems"], [])
 
     def test_margin_dates_in_the_usual_forms(self):
@@ -508,6 +547,22 @@ class WebTests(unittest.TestCase):
         environ = {"REQUEST_METHOD": "GET", "REMOTE_ADDR": "127.0.0.1", **headers}
         self.assertEqual(web.Request(environ, trust_proxy=False).ip, "127.0.0.1")
         self.assertEqual(web.Request(environ, trust_proxy=True).ip, "203.0.113.50")
+
+    def test_a_trusted_proxy_that_sends_no_x_forwarded_for_is_reported(self):
+        # Waitress drops the header unless told to trust the proxy: every client
+        # would then be counted as the proxy's address, so it is said on stderr.
+        app = web.App(self.db_path, trust_proxy=True)
+        self.addCleanup(app.close_connection)
+        with unittest.mock.patch("sys.stderr", io.StringIO()) as stderr:
+            Client(app, ip="127.0.0.1").get(
+                "/api/me", headers={"HTTP_X_FORWARDED_FOR": "203.0.113.5"})
+            self.assertEqual(stderr.getvalue(), "")
+            for _ in range(3):
+                self.assertEqual(Client(app, ip="127.0.0.1").get("/api/me")[0], 401)
+        self.assertEqual(stderr.getvalue().count("warning: trust_proxy"), 1)
+        self.assertIn("trusted_proxy_headers", stderr.getvalue())
+        environ = {"REQUEST_METHOD": "GET", "REMOTE_ADDR": "127.0.0.1"}
+        self.assertEqual(web.Request(environ, trust_proxy=True).ip, "127.0.0.1")
 
     # --- admin user management ---
     def test_admin_blocks_and_worker_is_logged_out(self):
@@ -852,6 +907,10 @@ class WebTests(unittest.TestCase):
                   encoding="utf-8") as f:
             readme = f.read()
         self.assertTrue("per server process" in readme, "README: limits are per process")
+        # waitress drops X-Forwarded-For unless it is told to trust the proxy
+        for text in (web.__doc__, readme):
+            self.assertIn("trusted_proxy_headers", text)
+        self.assertIn("--trusted-proxy-headers=x-forwarded-for", readme)
 
     # --- cookies and the bundled server ---
     def test_session_cookie_is_found_among_other_cookies(self):
@@ -923,6 +982,51 @@ class WebTests(unittest.TestCase):
                 http_conn.close()
                 self.assertEqual(response.status, 401)
         self.assertLessEqual(opened.call_count, web.DEV_SERVER_THREADS)
+
+    def test_bundled_server_lets_go_of_a_client_that_sends_a_byte_now_and_then(self):
+        # One byte every 0.1 s never trips the 30 s idle limit: without a limit
+        # on the whole request, DEV_SERVER_THREADS such clients hold every thread.
+        for patch in (unittest.mock.patch.object(web._Handler, "request_seconds", 1,
+                                                 create=True),
+                      unittest.mock.patch("sys.stderr", io.StringIO())):  # the server's log
+            patch.start()
+            self.addCleanup(patch.stop)
+        server = web.dev_server(self.app, "127.0.0.1", 0)
+        serving = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
+        serving.start()
+        stop_dripping, drippers = threading.Event(), []
+
+        def drip():
+            with socket.create_connection(("127.0.0.1", server.server_port)) as sock:
+                for byte in b"GET /api/me HTTP/1.1\r\nX-Slow: " + b"a" * 1000:
+                    if stop_dripping.wait(0.1):
+                        return
+                    try:
+                        sock.send(bytes([byte]))
+                    except OSError:         # let go by the server
+                        return
+
+        def stop():
+            stop_dripping.set()
+            for dripper in drippers:
+                dripper.join(5)
+            server.shutdown()
+            server.server_close()
+            for worker in server.workers:
+                worker.join(5)
+        self.addCleanup(stop)
+        for _ in range(web.DEV_SERVER_THREADS):
+            drippers.append(threading.Thread(target=drip, daemon=True))
+            drippers[-1].start()
+        time.sleep(0.5)                     # every thread is reading a dripper now
+        started = time.monotonic()
+        http_conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        http_conn.request("GET", "/api/me")
+        response = http_conn.getresponse()
+        response.read()
+        http_conn.close()
+        self.assertEqual(response.status, 401)
+        self.assertLess(time.monotonic() - started, 4)
 
     def test_login_with_arabic_indic_digits(self):
         status, _ = Client(self.app).post("/api/login", {"phone": "٠٩١٠٠٠٠٠٠٠",
@@ -1018,6 +1122,8 @@ class WebTests(unittest.TestCase):
             "POST /api/admin/prices": ("/api/admin/prices", {"currency": "USD", "rate": "9"}),
             "GET /api/admin/suppliers": "/api/admin/suppliers",
             "POST /api/admin/suppliers": ("/api/admin/suppliers", {"name": "Tunis agent"}),
+            "POST /api/admin/suppliers/<id>/active": (f"{sup}/active",
+                                                     {"active": False, **reason}),
             "POST /api/admin/suppliers/<id>/price": (f"{sup}/price",
                                                     {"currency": "USD", "rate": "1"}),
             "POST /api/admin/suppliers/<id>/pay": (f"{sup}/pay", {
@@ -1030,6 +1136,7 @@ class WebTests(unittest.TestCase):
             "POST /api/admin/orders/paid": ("/api/admin/orders/paid", {
                 "receipt_code": order["receipt_code"], "payout_ref": "P-1"}),
             "GET /api/admin/margin": "/api/admin/margin?since=2026-01-01",
+            "GET /api/admin/log": "/api/admin/log?action=issue_setup_code",
         }
         for method, regex, _ in web.ROUTES:
             route = regex.pattern[1:-1].replace("(?P<id>[0-9]+)", "<id>")
@@ -1601,6 +1708,57 @@ class WebTests(unittest.TestCase):
         self.assertEqual((status, answer["type"]), (401, "NotLoggedIn"))
         self.assertEqual(self.admin.post("/api/admin/tills", {"name": "main"})[0], 401)
         self.assertEqual(ali.get("/api/me")[0], 200)        # a worker's week has no idle limit
+
+    def test_admin_statements_read_the_balance_and_entries_at_one_moment(self):
+        ali_id, _ = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        self.setup_orders(ali_id)
+        other = A.connect(self.db_path)     # another server thread
+        self.addCleanup(other.close)
+        real_balance, done = L.account_balance, set()
+
+        def posted_meanwhile(conn, code):
+            # the other connection commits just after the balance is read
+            result = real_balance(conn, code)
+            if code not in done and code in (f"CUS_{ali_id}", "SUP_1"):
+                done.add(code)
+                if code == "SUP_1":
+                    O.pay_supplier(other, 1, 5000, admin_id=1, from_code="BANK",
+                                   reference="W-1")
+                else:
+                    L.deposit(other, ali_id, 5000, admin_id=1, into="BANK")
+            return result
+
+        with unittest.mock.patch.object(L, "account_balance", posted_meanwhile):
+            for path in (f"/api/admin/users/{ali_id}/statement",
+                         "/api/admin/suppliers/1/statement"):
+                status, answer = self.admin.get(path)
+                self.assertEqual(status, 200, answer)
+                top = answer["entries"][0]["balance_after"] if answer["entries"] else 0
+                self.assertEqual(answer["balance"]["dirhams"], top, path)
+        self.assertEqual(done, {f"CUS_{ali_id}", "SUP_1"})
+        self.assertEqual(self.lyd(user_id=ali_id), "1,005.000")
+
+    def test_the_admin_log_can_be_read_by_admins(self):
+        # Setup codes issued and used, and unassign reasons, are only in the log.
+        ali_id, ali, order = self.admin_fixture()
+        o = f"/api/admin/orders/{order['id']}"
+        self.assertEqual(self.admin.post(f"{o}/assign", {"supplier_id": 1})[0], 200)
+        self.assertEqual(self.admin.post(f"{o}/unassign", {
+            "reason": "Cairo has not paid; Tunis is cheaper"})[0], 200)
+        status, answer = ali.get("/api/admin/log")
+        self.assertEqual((status, answer["type"]), (403, "PermissionDenied"))
+        self.assertEqual(self.admin.post(f"/api/admin/users/{ali_id}/setup-code")[0], 200)
+        status, log = self.admin.get("/api/admin/log")
+        self.assertEqual(status, 200, log)
+        self.assertEqual(log["entries"][0]["action"], "issue_setup_code")    # newest first
+        status, log = self.admin.get(
+            f"/api/admin/log?action=unassign_supplier&target={order['id']}")
+        self.assertEqual([(e["admin_id"], e["details"]) for e in log["entries"]], [
+            (1, {"supplier_id": 1, "reason": "Cairo has not paid; Tunis is cheaper"})])
+        status, log = self.admin.get(f"/api/admin/log?target={ali_id}&limit=3")
+        self.assertEqual([e["action"] for e in log["entries"]],
+                         ["issue_setup_code", "setup_code_used", "issue_setup_code"])
+        self.assertTrue(all(e["at"] for e in log["entries"]))
 
     # --- the README describes what the app does ---
     def test_readme_names_every_route_and_error_status(self):

@@ -269,6 +269,20 @@ class OrderTests(unittest.TestCase):
             ("set_currency_active", "USD", '{"active": false, "reason": "wrong price typed"}'),
             ("set_currency_active", "USD", '{"active": true, "reason": "fixed"}')])
 
+    def test_a_supplier_rate_can_be_set_while_the_currency_is_off(self):
+        # Switched off because the market jumped: the orders already placed are
+        # still assigned, at what the supplier charges now.
+        o = self.order("100")
+        O.set_currency_active(self.db, "USD", False, admin_id=self.admin,
+                              reason="market jumped")
+        O.set_supplier_price(self.db, self.supplier, "USD", "7.95", admin_id=self.admin)
+        O.assign_supplier(self.db, o["id"], self.supplier, admin_id=self.admin)
+        held = O.find_by_receipt(self.db, o["receipt_code"])
+        self.assertEqual((held["supplier_rate"], held["supplier_cost"]), ("7.95", lyd("795")))
+        with self.assertRaises(L.LedgerError):          # a currency that doesn't exist
+            O.set_supplier_price(self.db, self.supplier, "GBP", "1", admin_id=self.admin)
+        self.assertHealthy()
+
     def test_switching_a_currency_needs_an_admin_a_reason_and_a_change(self):
         with self.assertRaises(L.PermissionDenied):
             O.set_currency_active(self.db, "USD", False, admin_id=self.ali, reason="x")

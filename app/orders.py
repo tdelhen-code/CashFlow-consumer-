@@ -8,7 +8,10 @@ An order with a supplier can't be cancelled or given to another supplier
 directly: first unassign it (after checking with the supplier that they have
 not paid), then cancel or assign again. A blocked worker's orders are held: no
 supplier is assigned until they are unblocked. A payout the supplier already
-made is still recorded (mark_paid), so the books say what really happened.
+made is still recorded (mark_paid), so the books say what really happened,
+also on an order unassigned meanwhile (mark_paid with that supplier_id).
+set_supplier_active switches a supplier off: no new orders are assigned to
+it, while its open orders can still be paid, unassigned and settled.
 
 A wrong price: set the right one with void_quotes=True, which also makes every
 quote taken before it unusable (by default a quote keeps its price for its 10
@@ -212,8 +215,9 @@ def _customer_not_blocked(conn, order):
     the supplier already made still work."""
     if conn.execute("SELECT blocked FROM users WHERE id = ?",
                     (order["customer_id"],)).fetchone()["blocked"]:
-        raise L.AccountBlocked("the worker is blocked: their orders are held until "
-                               "they are unblocked (or cancel the order)")
+        raise L.AccountBlocked("the worker is blocked: no supplier can be assigned until "
+                               "they are unblocked; if a supplier already paid this "
+                               "order, mark it paid with that supplier_id")
 
 
 def _active_currency(conn, code):
@@ -313,14 +317,39 @@ def add_supplier(conn, name, country=None, *, admin_id):
         return supplier_id
 
 
+def set_supplier_active(conn, supplier_id, active, *, admin_id, reason):
+    """Switch a supplier off (active=False), e.g. one that stopped working or
+    is not trusted, or back on. While it is off no order can be assigned to
+    it; its orders already assigned can still be marked paid or unassigned,
+    and it can still be paid (pay_supplier). The reason is logged."""
+    if not isinstance(active, bool):
+        raise L.LedgerError("active must be true or false")
+    reason = L._reason(reason)
+    with L._write(conn):
+        L._require_admin(conn, admin_id)
+        row = conn.execute("SELECT active FROM suppliers WHERE id = ?",
+                           (supplier_id,)).fetchone()
+        if not row:
+            raise L.NotFound("supplier not found")
+        if bool(row["active"]) == active:
+            raise L.LedgerError(f"the supplier is already {'on' if active else 'off'}")
+        conn.execute("UPDATE suppliers SET active = ? WHERE id = ?",
+                     (int(active), supplier_id))
+        L._log(conn, admin_id, "set_supplier_active", supplier_id, active=active,
+               reason=reason)
+
+
 def set_supplier_price(conn, supplier_id, currency, rate, *, admin_id, now=None):
     """rate = LYD this supplier charges us for 1 unit of the currency, up to 6
-    decimals. Every rate ever agreed is kept."""
+    decimals. Every rate ever agreed is kept. Can be set while the currency is
+    switched off, so orders placed before are assigned at the right rate."""
     currency = _currency_code(currency)
     r = _decimal(rate, 6, "rate")
     with L._write(conn):
         L._require_admin(conn, admin_id)
-        _active_currency(conn, currency)
+        if not conn.execute("SELECT 1 FROM currencies WHERE code = ?",
+                            (currency,)).fetchone():
+            raise L.LedgerError(f"{currency} is not available")
         _supplier_account(conn, supplier_id)
         cur = conn.execute(
             "INSERT INTO supplier_prices(supplier_id, currency, rate, set_by, set_at) "
@@ -416,12 +445,29 @@ def place_order(conn, customer_id, quote_id, beneficiary_name, beneficiary_id, *
 
 # ---------- admin side ----------
 
+def _lock_supplier(conn, order, supplier_id, rate, now):
+    """Put a placed order with a supplier at what they charge for it: `rate`
+    (a one-off deal) or their current agreed rate for the currency. Returns
+    (rate, supplier_cost)."""
+    if rate is None:
+        price = current_supplier_price(conn, supplier_id, order["currency"])
+        if not price:
+            raise L.LedgerError(f"no agreed {order['currency']} rate with this supplier")
+        rate = Decimal(price["rate"])
+    supplier_cost = _lyd_cost(order["foreign_amount"], rate)
+    conn.execute(
+        "UPDATE orders SET status = 'assigned', supplier_id = ?, supplier_rate = ?, "
+        "supplier_cost = ?, assigned_at = ? WHERE id = ?",
+        (supplier_id, str(rate), supplier_cost, _now(now).isoformat(), order["id"]))
+    return rate, supplier_cost
+
+
 def assign_supplier(conn, order_id, supplier_id, *, admin_id, rate=None, now=None):
     """Give a placed order to a supplier and lock what they charge for it: `rate`
     if given (a one-off deal), otherwise their current agreed rate for the
     currency. An order already with a supplier is refused: unassign_supplier it
     first (with a reason, after checking they have not paid). Refused while the
-    worker is blocked."""
+    worker is blocked, and for a supplier that is switched off."""
     r = None if rate is None else _decimal(rate, 6, "rate")
     with L._write(conn):
         L._require_admin(conn, admin_id)
@@ -432,43 +478,57 @@ def assign_supplier(conn, order_id, supplier_id, *, admin_id, rate=None, now=Non
         if o["status"] != "placed":
             raise L.LedgerError(f"order is {o['status']}")
         _customer_not_blocked(conn, o)
-        if not conn.execute("SELECT 1 FROM suppliers WHERE id = ? AND active = 1",
-                            (supplier_id,)).fetchone():
+        supplier = conn.execute("SELECT active FROM suppliers WHERE id = ?",
+                                (supplier_id,)).fetchone()
+        if not supplier:
             raise L.NotFound("supplier not found")
-        if r is None:
-            price = current_supplier_price(conn, supplier_id, o["currency"])
-            if not price:
-                raise L.LedgerError(f"no agreed {o['currency']} rate with this supplier")
-            r = Decimal(price["rate"])
-        supplier_cost = _lyd_cost(o["foreign_amount"], r)
-        conn.execute(
-            "UPDATE orders SET status = 'assigned', supplier_id = ?, supplier_rate = ?, "
-            "supplier_cost = ?, assigned_at = ? WHERE id = ?",
-            (supplier_id, str(r), supplier_cost, _now(now).isoformat(), order_id))
+        if not supplier["active"]:
+            raise L.LedgerError("this supplier is switched off")
+        r, supplier_cost = _lock_supplier(conn, o, supplier_id, r, now)
         L._log(conn, admin_id, "assign_supplier", order_id, supplier_id=supplier_id,
                rate=str(r), supplier_cost=supplier_cost)
 
 
-def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, now=None):
+def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, rate=None,
+              now=None):
     """Record that the supplier paid the beneficiary. Works once per order.
     `supplier_id`, if given, is the supplier whose confirmation this is: refused
     (Conflict) if the order is with another supplier by now. Also while the
     worker is blocked: the money has left by then, so it is recorded (and the
-    log says the worker was blocked); refusing it would leave the books wrong."""
+    log says the worker was blocked); refusing it would leave the books wrong.
+    An order with no supplier (placed, e.g. unassigned on the supplier's word
+    that it had not paid, then it sends proof it did) is marked paid only with
+    that `supplier_id`: its agreed rate (or `rate`, a one-off deal) is locked
+    onto the order as assign_supplier does, in the same step. That orders no
+    new payout, so it works while the worker is blocked, and for a supplier
+    that is switched off."""
     ref = (payout_ref or "").strip()
     if not ref:
         raise L.LedgerError("the supplier's confirmation reference is required")
     code = (receipt_code or "").strip().upper()
+    r = None if rate is None else _decimal(rate, 6, "rate")
     with L._write(conn):
         L._require_admin(conn, admin_id)
         o = conn.execute("SELECT * FROM orders WHERE receipt_code = ?",
                          (code,)).fetchone()
         if not o:
             raise L.NotFound("receipt code not found")
-        if o["status"] == "placed":
-            raise L.LedgerError("assign a supplier first")
-        if o["status"] != "assigned":
+        if o["status"] not in ("placed", "assigned"):
             raise L.LedgerError(f"order is already {o['status']}")
+        assigned_now = {}
+        if o["status"] == "placed":
+            if supplier_id is None:
+                raise L.LedgerError("assign a supplier first, or give the supplier_id "
+                                    "whose confirmation this is")
+            if not conn.execute("SELECT 1 FROM suppliers WHERE id = ?",
+                                (supplier_id,)).fetchone():
+                raise L.NotFound("supplier not found")
+            r, cost = _lock_supplier(conn, o, supplier_id, r, now)
+            assigned_now = {"assigned_with_payout": True, "rate": str(r),
+                            "supplier_cost": cost}
+            o = _get_order(conn, o["id"])
+        elif r is not None:
+            raise L.LedgerError("this order's supplier rate was set when it was assigned")
         if supplier_id is not None and o["supplier_id"] != supplier_id:
             raise L.Conflict("this order is with another supplier now: check which "
                              "supplier paid it before marking it paid")
@@ -484,7 +544,8 @@ def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, now
         blocked = conn.execute("SELECT blocked FROM users WHERE id = ?",
                                (o["customer_id"],)).fetchone()["blocked"]
         L._log(conn, admin_id, "mark_paid", o["id"], receipt=code, payout_ref=ref,
-               supplier_id=o["supplier_id"], margin=margin, customer_blocked=bool(blocked))
+               supplier_id=o["supplier_id"], margin=margin, customer_blocked=bool(blocked),
+               **assigned_now)
         return txn
 
 

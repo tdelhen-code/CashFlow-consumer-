@@ -3,7 +3,10 @@
 Run locally:      python3 -m app.web --db wallet.db --port 8000 --insecure-cookies
 In production:    serve `app.web:make_app("wallet.db", trust_proxy=True)` with a
                   WSGI server such as waitress or gunicorn, in one process, behind
-                  HTTPS (nginx, Caddy, ...) that sets X-Forwarded-For.
+                  HTTPS (nginx, Caddy, ...) that sets X-Forwarded-For. Waitress
+                  drops that header unless told to trust the proxy:
+                  trusted_proxy="127.0.0.1" (the proxy's address) and
+                  trusted_proxy_headers="x-forwarded-for".
 
 Rules every request follows:
 - Requests and responses are JSON. POST bodies must be sent as
@@ -24,6 +27,7 @@ Rules every request follows:
   unexpected errors say only "internal error" and are logged on the server.
 """
 import argparse
+import io
 import ipaddress
 import json
 import queue
@@ -452,12 +456,14 @@ def admin_users(app, conn, req):
 @route("POST", "/api/admin/users")
 def admin_create_user(app, conn, req):
     admin = _admin(conn, req)
+    # Every field is checked before the user is written: a bad one is a 400
+    # with nothing made, not an account without a code that a retry can't make.
+    reason = req.get("reason", required=False) or "new account"
     user_id = L.create_user(conn, req.get("role", required=False) or "customer",
                             req.get("name"), req.get("phone"),
                             req.get("language", required=False) or "ar",
                             admin_id=admin, whatsapp=req.get("whatsapp", required=False))
-    code = A.issue_setup_code(conn, user_id, admin_id=admin,
-                              reason=req.get("reason", required=False) or "new account")
+    code = A.issue_setup_code(conn, user_id, admin_id=admin, reason=reason)
     return {"id": user_id, "setup_code": code}
 
 
@@ -493,9 +499,10 @@ for _name, _func in (("block", L.block_user), ("unblock", L.unblock_user),
 @route("GET", "/api/admin/users/<id>/statement")
 def admin_user_statement(app, conn, req):
     _admin(conn, req)
-    code = f"CUS_{req.int('id')}"
-    return {"balance": _money(L.account_balance(conn, code)),
-            "entries": L.account_statement(conn, code, _limit(req))}
+    code, limit = f"CUS_{req.int('id')}", _limit(req)
+    with L._read(conn):     # the balance and the entries from the same moment
+        return {"balance": _money(L.account_balance(conn, code)),
+                "entries": L.account_statement(conn, code, limit)}
 
 
 # ---------- admin: money ----------
@@ -613,6 +620,13 @@ def admin_add_supplier(app, conn, req):
                                  admin_id=_admin(conn, req))}
 
 
+@route("POST", "/api/admin/suppliers/<id>/active")
+def admin_supplier_active(app, conn, req):
+    O.set_supplier_active(conn, req.int("id"), req.body.get("active"),
+                          admin_id=_admin(conn, req), reason=req.get("reason"))
+    return {"ok": True}
+
+
 @route("POST", "/api/admin/suppliers/<id>/price")
 def admin_supplier_price(app, conn, req):
     O.set_supplier_price(conn, req.int("id"), req.get("currency"), req.amount("rate"),
@@ -632,8 +646,10 @@ def admin_pay_supplier(app, conn, req):
 @route("GET", "/api/admin/suppliers/<id>/statement")
 def admin_supplier_statement(app, conn, req):
     _admin(conn, req)
-    return {"balance": _money(O.supplier_balance(conn, req.int("id"))),
-            "entries": O.supplier_statement(conn, req.int("id"), _limit(req))}
+    supplier, limit = req.int("id"), _limit(req)
+    with L._read(conn):     # the balance and the entries from the same moment
+        return {"balance": _money(O.supplier_balance(conn, supplier)),
+                "entries": O.supplier_statement(conn, supplier, limit)}
 
 
 @route("GET", "/api/admin/orders")
@@ -672,7 +688,8 @@ def admin_cancel(app, conn, req):
 def admin_mark_paid(app, conn, req):
     return {"txn_id": O.mark_paid(
         conn, req.get("receipt_code"), req.get("payout_ref"), admin_id=_admin(conn, req),
-        supplier_id=req.number("supplier_id", required=False))}  # whose confirmation
+        supplier_id=req.number("supplier_id", required=False),  # whose confirmation
+        rate=req.amount("rate", required=False))}      # only without a supplier yet
 
 
 def _report_time(text):
@@ -702,6 +719,17 @@ def admin_margin(app, conn, req):
     return {"rows": O.margin_report(conn, since, until)}
 
 
+@route("GET", "/api/admin/log")
+def admin_log(app, conn, req):
+    """The admin log, newest first: who issued and used setup codes, unassign,
+    block and cancel reasons... ?action= and ?target= (a user, order or
+    transaction id, a till or currency code) narrow it."""
+    _admin(conn, req)
+    return {"entries": L.admin_log(conn, action=req.query.get("action") or None,
+                                   target=req.query.get("target") or None,
+                                   limit=_limit(req))}
+
+
 # ---------- the app ----------
 
 class App:
@@ -718,6 +746,7 @@ class App:
             message="too many logins to this account; wait a few minutes")
         self.worker_limiter = worker_limiter or RateLimiter(
             WORKER_REQUESTS_PER_MINUTE, 60, message="too many requests; wait a minute")
+        self.warned_no_forwarded_for = False
         self.local = threading.local()
         A.connect(db_path).close()      # create the tables once, up front
 
@@ -737,8 +766,23 @@ class App:
             conn.close()
             self.local.conn = None
 
+    def _check_forwarded_for(self, environ):
+        """With trust_proxy, a request without X-Forwarded-For is counted for
+        the address it came from, the proxy's: every client would share one
+        login limit and lock. Said once on stderr, as it means the proxy or
+        the server drops the header (waitress does unless told to trust it)."""
+        if self.trust_proxy and not environ.get("HTTP_X_FORWARDED_FOR") \
+                and not self.warned_no_forwarded_for:
+            self.warned_no_forwarded_for = True
+            print(f"warning: trust_proxy is set but a request from "
+                  f"{environ.get('REMOTE_ADDR')} came without X-Forwarded-For, so it "
+                  "counts for that address; make the proxy set the header (with "
+                  "waitress: trusted_proxy=<the proxy's address>, "
+                  "trusted_proxy_headers='x-forwarded-for')", file=sys.stderr)
+
     def __call__(self, environ, start_response):
         cookie = None
+        self._check_forwarded_for(environ)
         try:
             req = Request(environ, self.trust_proxy, self.cookie_name)
             for method, regex, handler in ROUTES:
@@ -793,12 +837,51 @@ def make_app(db_path, **options):
     """The WSGI app for a production server, e.g. in a small wsgi.py:
     application = make_app('/srv/wallet/wallet.db', trust_proxy=True)
     Run it in one process (threads are fine): the request limits are kept in
-    memory, per process."""
+    memory, per process. With waitress, also trust the proxy, or it drops
+    X-Forwarded-For and every client looks like the proxy:
+    waitress.serve(application, trusted_proxy='127.0.0.1',
+                   trusted_proxy_headers='x-forwarded-for')"""
     return App(db_path, **options)
 
 
+class _RequestDeadline(io.RawIOBase):
+    """How the bundled server reads a request: all of it (line, headers and
+    body) must arrive within `seconds`, so a client that sends a byte now and
+    then is let go too, not only one that sends nothing for `idle` seconds."""
+
+    def __init__(self, sock, seconds, idle):
+        self.sock, self.idle = sock, idle
+        self.deadline = time.monotonic() + seconds
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the request took too long to arrive")
+        self.sock.settimeout(min(left, self.idle))
+        try:
+            return self.sock.recv_into(buffer)
+        finally:
+            self.sock.settimeout(self.idle)     # sending the answer: the usual time
+
+
 class _Handler(WSGIRequestHandler):
-    timeout = 30        # seconds: a client that stops sending frees its thread
+    timeout = 30            # seconds: a client that stops sending frees its thread,
+    request_seconds = 30    # and so does one whose request takes longer to arrive
+
+    def setup(self):
+        super().setup()
+        self.rfile.close()      # the plain reader: read through the deadline instead
+        self.rfile = io.BufferedReader(
+            _RequestDeadline(self.connection, self.request_seconds, self.timeout))
+
+    def handle(self):
+        try:
+            super().handle()
+        except TimeoutError:    # a client too slow: let go, without a traceback
+            self.log_error("request timed out")
 
 
 class _PooledServer(WSGIServer):

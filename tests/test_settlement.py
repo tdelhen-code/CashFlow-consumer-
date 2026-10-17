@@ -122,6 +122,73 @@ class SettlementTests(unittest.TestCase):
         self.assertEqual(json.loads(logged)["supplier_id"], self.tunis)
         self.assertHealthy()
 
+    def test_a_placed_order_is_marked_paid_only_with_the_supplier_who_paid_it(self):
+        # Unassigned on the supplier's word that it had not paid, then it sends
+        # proof that it did: its rate is locked on in the same step.
+        o = self.order("100")
+        with self.assertRaises(L.LedgerError):
+            O.mark_paid(self.db, o["receipt_code"], "TUNIS-1", admin_id=self.admin)
+        with self.assertRaises(L.NotFound):
+            O.mark_paid(self.db, o["receipt_code"], "TUNIS-1", admin_id=self.admin,
+                        supplier_id=999)
+        egp = self.order("1000", "EGP")
+        with self.assertRaises(L.LedgerError):          # no agreed EGP rate with Tunis
+            O.mark_paid(self.db, egp["receipt_code"], "TUNIS-2", admin_id=self.admin,
+                        supplier_id=self.tunis)
+        self.assertEqual(O.find_by_receipt(self.db, egp["receipt_code"])["status"], "placed")
+        O.mark_paid(self.db, o["receipt_code"], "TUNIS-1", admin_id=self.admin,
+                    supplier_id=self.tunis, rate="7.81")
+        paid = O.find_by_receipt(self.db, o["receipt_code"])
+        self.assertEqual((paid["status"], paid["supplier_id"], paid["supplier_cost"]),
+                         ("paid", self.tunis, lyd("781")))
+        self.assertEqual(O.supplier_balance(self.db, self.tunis), lyd("781"))
+        later = self.order("10")
+        O.assign_supplier(self.db, later["id"], self.cairo, admin_id=self.admin)
+        with self.assertRaises(L.LedgerError):          # its rate was locked on assigning
+            O.mark_paid(self.db, later["receipt_code"], "CAIRO-1", admin_id=self.admin,
+                        rate="7.00")
+        self.assertHealthy()
+
+    def test_a_supplier_switched_off_gets_no_new_orders_but_its_open_ones_settle(self):
+        paid, taken_back, new = self.order("100"), self.order("10"), self.order("20")
+        for o in (paid, taken_back):
+            O.assign_supplier(self.db, o["id"], self.cairo, admin_id=self.admin)
+        O.set_supplier_active(self.db, self.cairo, False, admin_id=self.admin,
+                              reason="stopped answering")
+        with self.assertRaises(L.LedgerError) as caught:
+            O.assign_supplier(self.db, new["id"], self.cairo, admin_id=self.admin)
+        self.assertNotIsInstance(caught.exception, L.NotFound)
+        O.mark_paid(self.db, paid["receipt_code"], "CAIRO-1", admin_id=self.admin)
+        O.unassign_supplier(self.db, taken_back["id"], admin_id=self.admin,
+                            reason="Cairo has not paid it")
+        O.pay_supplier(self.db, self.cairo, lyd("780"), admin_id=self.admin,
+                       from_code="BANK", reference="W-1")
+        self.assertEqual(O.supplier_balance(self.db, self.cairo), 0)
+        O.assign_supplier(self.db, new["id"], self.tunis, admin_id=self.admin)
+        O.set_supplier_active(self.db, self.cairo, True, admin_id=self.admin, reason="back")
+        O.assign_supplier(self.db, taken_back["id"], self.cairo, admin_id=self.admin)
+        log = [(r["target"], json.loads(r["details"])) for r in self.db.execute(
+            "SELECT target, details FROM admin_log WHERE action = 'set_supplier_active' "
+            "ORDER BY id")]
+        self.assertEqual(log, [(str(self.cairo), {"active": False,
+                                                  "reason": "stopped answering"}),
+                               (str(self.cairo), {"active": True, "reason": "back"})])
+        self.assertEqual(self.db.execute("SELECT active FROM suppliers WHERE id = ?",
+                                         (self.cairo,)).fetchone()[0], 1)
+        self.assertHealthy()
+
+    def test_switching_a_supplier_needs_an_admin_a_reason_and_a_change(self):
+        with self.assertRaises(L.PermissionDenied):
+            O.set_supplier_active(self.db, self.cairo, False, admin_id=self.ali, reason="x")
+        with self.assertRaises(L.LedgerError):
+            O.set_supplier_active(self.db, self.cairo, False, admin_id=self.admin, reason=" ")
+        with self.assertRaises(L.LedgerError):          # it is on already
+            O.set_supplier_active(self.db, self.cairo, True, admin_id=self.admin, reason="x")
+        with self.assertRaises(L.NotFound):
+            O.set_supplier_active(self.db, 999, False, admin_id=self.admin, reason="x")
+        with self.assertRaises(L.LedgerError):
+            O.set_supplier_active(self.db, self.cairo, 0, admin_id=self.admin, reason="x")
+
     def test_assigning_needs_an_agreed_rate(self):
         o = self.order("1000", "EGP")
         with self.assertRaises(L.LedgerError):

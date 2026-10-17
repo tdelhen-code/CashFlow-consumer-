@@ -1,5 +1,8 @@
+import os
 import sqlite3
+import tempfile
 import unittest
+from unittest import mock
 
 from app import ledger as L
 
@@ -339,6 +342,36 @@ class LedgerTests(unittest.TestCase):
         rows = L.reconcile(self.db, {"BANK": lyd("590"), self.till: lyd("400.5")})
         self.assertEqual([r["difference"] for r in rows], [-lyd("10"), lyd("0.5")])
         self.assertFalse(any(r["ok"] for r in rows))
+
+    def test_reconcile_reads_one_snapshot_while_others_write(self):
+        # Money moved from the bank to a till by another admin between reading
+        # the bank and reading the till must not show as a gap that never was.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "wallet.db")
+        db, other = L.connect(path), L.connect(path)     # two server threads
+        self.addCleanup(db.close)
+        self.addCleanup(other.close)
+        admin = L.create_user(db, "admin", "Admin", "0910000000")
+        ali = L.create_user(db, "customer", "Ali", "0911111111", admin_id=admin)
+        till = L.add_till(db, "main", admin_id=admin)
+        L.deposit(db, ali, lyd("1000"), admin_id=admin, into="BANK")
+        real_amount, moved = L.holding_amount, []
+
+        def moved_meanwhile(conn, code):
+            result = real_amount(conn, code)
+            if not moved:       # committed just after the first account is read
+                moved.append(L.move_money(other, "BANK", till, lyd("400"), admin_id=admin))
+            return result
+
+        with mock.patch.object(L, "holding_amount", moved_meanwhile):
+            rows = L.reconcile(db, {"BANK": lyd("1000"), till: 0})
+        self.assertTrue(moved)
+        self.assertEqual([(r["account"], r["expected"], r["ok"]) for r in rows],
+                         [("BANK", lyd("1000"), True), (till, 0, True)])
+        self.assertFalse(db.in_transaction)
+        rows = L.reconcile(db, {"BANK": lyd("600"), till: lyd("400")})
+        self.assertTrue(all(r["ok"] for r in rows))
 
 
 if __name__ == "__main__":

@@ -35,7 +35,9 @@ Users:
   Their open currency orders are held too: no supplier can be assigned until
   they are unblocked (an admin can still unassign and cancel, which refunds to
   the frozen balance). A payout the supplier already made is still recorded.
-  Blocked admins lose admin rights. Both need a reason and are logged.
+  Blocked admins lose admin rights, and the setup codes they issued that
+  nobody has used yet stop working (also when an admin is deactivated).
+  Blocking and unblocking need a reason and are logged.
 """
 import json
 import re
@@ -198,9 +200,9 @@ def parse_lyd(text):
 _EASTERN_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "0123456789" * 2)
 # What may stand between the digits of a phone number: spaces, dashes, dots,
 # brackets, and the invisible direction marks a number copied from
-# right-to-left text carries.
+# right-to-left text carries (the Arabic letter mark U+061C among them).
 _PHONE_SEPARATORS = re.compile(
-    r"[\s\-().\u2010-\u2015\u2212\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+    r"[\s\-().\u2010-\u2015\u2212\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 
 def _phone_text(text, what="phone number"):
@@ -492,6 +494,23 @@ def _end_sessions(conn, user_id):
                      "WHERE user_id = ? AND ended_at IS NULL", (user_id,))
 
 
+def _cancel_issued_codes(conn, user_id):
+    """Setup codes this (admin) user issued and nobody has used yet stop
+    working (when the login tables exist), so a blocked or departed admin
+    can't log in with one as a worker or another admin; unblocking or
+    reactivating doesn't bring them back. Returns whose codes they were: those
+    users need a new code from another admin."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                        "AND name = 'setup_codes'").fetchone():
+        return []
+    users = [r[0] for r in conn.execute(
+        "SELECT DISTINCT user_id FROM setup_codes WHERE issued_by = ? AND used_at IS NULL "
+        "ORDER BY user_id", (user_id,))]
+    conn.execute("UPDATE setup_codes SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                 "WHERE issued_by = ? AND used_at IS NULL", (user_id,))
+    return users
+
+
 def _reason(reason):
     reason = (reason or "").strip()
     if not reason:
@@ -501,7 +520,9 @@ def _reason(reason):
 
 def block_user(conn, user_id, *, admin_id, reason):
     """Freeze a user while a problem or suspicion is checked. Their balance stays
-    as it is; they can't send, receive, order or take cash until unblocked."""
+    as it is; they can't send, receive, order or take cash until unblocked.
+    Their sessions end, and setup codes they issued (an admin) and nobody has
+    used yet stop working; the log lists whose they were."""
     reason = _reason(reason)
     if user_id == admin_id:
         raise LedgerError("you cannot block yourself")
@@ -514,7 +535,9 @@ def block_user(conn, user_id, *, admin_id, reason):
             "blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
             (reason, user_id))
         _end_sessions(conn, user_id)
-        _log(conn, admin_id, "block_user", user_id, reason=reason)
+        cancelled = _cancel_issued_codes(conn, user_id)
+        _log(conn, admin_id, "block_user", user_id, reason=reason,
+             **({"setup_codes_cancelled_for": cancelled} if cancelled else {}))
 
 
 def unblock_user(conn, user_id, *, admin_id, reason):
@@ -530,7 +553,8 @@ def unblock_user(conn, user_id, *, admin_id, reason):
 
 def deactivate_user(conn, user_id, *, admin_id, reason):
     """The user has left. Only at a zero balance and with no unfinished orders,
-    so no money is left behind on a closed account."""
+    so no money is left behind on a closed account. Their sessions end, and
+    setup codes they issued and nobody has used yet stop working."""
     reason = _reason(reason)
     if user_id == admin_id:
         raise LedgerError("you cannot deactivate yourself")
@@ -550,7 +574,9 @@ def deactivate_user(conn, user_id, *, admin_id, reason):
             raise LedgerError("user has unfinished orders")
         conn.execute("UPDATE users SET active = 0 WHERE id = ?", (user_id,))
         _end_sessions(conn, user_id)
-        _log(conn, admin_id, "deactivate_user", user_id, reason=reason)
+        cancelled = _cancel_issued_codes(conn, user_id)
+        _log(conn, admin_id, "deactivate_user", user_id, reason=reason,
+             **({"setup_codes_cancelled_for": cancelled} if cancelled else {}))
 
 
 def reactivate_user(conn, user_id, *, admin_id, reason):
@@ -824,6 +850,22 @@ def account_statement(conn, code, limit=50):
     return _statement(conn, row["id"], limit)
 
 
+def admin_log(conn, *, action=None, target=None, limit=50):
+    """The admin log, newest first: who did what, to what, and the details
+    (reasons, setup codes issued and used, unassigned suppliers...). Optionally
+    only one action (e.g. 'issue_setup_code') or one target (a user, order or
+    transaction id, a till or currency code)."""
+    sql, args = "SELECT id, at, admin_id, action, target, details FROM admin_log", []
+    where = [(col, value) for col, value in (("action", action), ("target", target))
+             if value is not None]
+    if where:
+        sql += " WHERE " + " AND ".join(f"{col} = ?" for col, _ in where)
+        args += [str(value) for _, value in where]
+    rows = conn.execute(sql + " ORDER BY id DESC LIMIT ?", args + [limit]).fetchall()
+    return [dict(r, details=json.loads(r["details"]) if r["details"] else {})
+            for r in rows]
+
+
 def _statement(conn, acc, limit):
     rows = conn.execute(
         "SELECT * FROM ("
@@ -873,12 +915,16 @@ def verify_ledger(conn):
 
 def reconcile(conn, counts):
     """counts = {"BANK": dirhams on the statement, "TILL_MAIN": dirhams counted}.
-    One row per account: what the books say, what is really there, and the gap."""
-    rows = []
-    for code, actual in counts.items():
+    One row per account: what the books say, what is really there, and the gap.
+    The books are read from one snapshot, so a move between the bank and a till
+    committed meanwhile can't show as a gap that never existed."""
+    for actual in counts.values():
         if not isinstance(actual, int) or isinstance(actual, bool) or actual < 0:
             raise InvalidAmount("counts must be zero or more whole dirhams")
-        expected = holding_amount(conn, code)
-        rows.append({"account": code, "expected": expected, "actual": actual,
-                     "difference": actual - expected, "ok": actual == expected})
+    rows = []
+    with _read(conn):
+        for code, actual in counts.items():
+            expected = holding_amount(conn, code)
+            rows.append({"account": code, "expected": expected, "actual": actual,
+                         "difference": actual - expected, "ok": actual == expected})
     return rows
