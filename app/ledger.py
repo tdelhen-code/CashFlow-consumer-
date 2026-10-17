@@ -69,7 +69,11 @@ class InvalidAmount(LedgerError):
     pass
 
 
-class UnknownAccount(LedgerError):
+class NotFound(LedgerError):
+    """No such user, account, supplier, order, quote, receipt code or transaction."""
+
+
+class UnknownAccount(NotFound):
     pass
 
 
@@ -82,9 +86,10 @@ class AccountBlocked(LedgerError):
 
 
 class Conflict(LedgerError):
-    """Clashes with something already recorded: an existing till, currency or
-    supplier, a payroll batch that was already posted, a quote already used for
-    another beneficiary, or an order that is (now) with a different supplier."""
+    """Clashes with something already recorded: an existing till, currency,
+    supplier or phone number, a payroll batch that was already posted, a quote
+    already used for another beneficiary, or an order that is (now) with a
+    supplier, or with a different one."""
 
 
 SCHEMA = """
@@ -438,7 +443,7 @@ def create_user(conn, role, name, phone, language="ar", password_hash=None, *,
         else:
             _require_admin(conn, admin_id)
         if conn.execute("SELECT 1 FROM users WHERE phone = ?", (phone,)).fetchone():
-            raise LedgerError(f"{phone} is already registered")
+            raise Conflict(f"{phone} is already registered")
         cur = conn.execute(
             "INSERT INTO users(role, name, phone, whatsapp, language, password_hash) "
             "VALUES (?,?,?,?,?,?)", (role, name, phone, whatsapp, language, password_hash))
@@ -735,7 +740,7 @@ def withdraw_cash(conn, user_id, gross, fee, *, admin_id, from_till,
 def _txn_kind(conn, txn_id):
     row = conn.execute("SELECT kind FROM transactions WHERE id = ?", (txn_id,)).fetchone()
     if not row:
-        raise LedgerError("transaction not found")
+        raise NotFound("transaction not found")
     return row["kind"]
 
 

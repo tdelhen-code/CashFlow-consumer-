@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import tempfile
 import threading
 import time
 import unittest
@@ -444,6 +446,98 @@ class AuthTests(unittest.TestCase):
         L.block_user(self.db, boss, admin_id=self.admin, reason="suspicious payouts")
         with self.assertRaises(A.NotLoggedIn):
             A.authenticate(self.db, token, now=T0)
+
+
+class RaceTests(unittest.TestCase):
+    """Requests at the same moment, each on its own connection to one database
+    file, like the server's threads. Passwords are hashed outside the write
+    lock, so whatever matters is checked again inside it."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "wallet.db")
+        self.db = A.connect(self.path)
+        self.addCleanup(self.db.close)
+        self.admin = A.create_first_admin(self.db, "Admin", "0910000000", ADMIN_PW)
+        self.ali = L.create_user(self.db, "customer", "Ali", "0911111111",
+                                 admin_id=self.admin)
+        self.code = A.issue_setup_code(self.db, self.ali, admin_id=self.admin)
+
+    def at_once(self, *calls):
+        """Run each call(conn) in a thread of its own with its own connection;
+        what each one returned or raised, in order."""
+        results = [None] * len(calls)
+
+        def run(i, call):
+            conn = A.connect(self.path)
+            try:
+                results[i] = call(conn)
+            except Exception as e:
+                results[i] = e
+            finally:
+                conn.close()
+        threads = [threading.Thread(target=run, args=(i, call))
+                   for i, call in enumerate(calls)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        return results
+
+    def together(self, parties, name="hash_password", then=None):
+        """Patch A.<name> so that `parties` calls of it wait for each other
+        once their slow hash is done: by then each has made its checks outside
+        the lock. `then(secret)` runs next, in each thread."""
+        real, barrier = getattr(A, name), threading.Barrier(parties, timeout=5)
+
+        def wait_for_the_others(secret, *args):
+            result = real(secret, *args)
+            barrier.wait()
+            if then:
+                then(secret)
+            return result
+        return unittest.mock.patch.object(A, name, wait_for_the_others)
+
+    def test_one_setup_code_used_twice_at_once_works_once(self):
+        def use(password):
+            return lambda conn: A.set_password_with_code(conn, "0911111111", self.code,
+                                                         password)
+        with self.together(2):
+            results = self.at_once(use("owner-pass-11"), use("thief-pass-22"))
+        self.assertEqual(sorted(type(r).__name__ for r in results), ["LoginFailed", "str"],
+                         results)
+        won, lost = (("owner-pass-11", "thief-pass-22") if isinstance(results[0], str)
+                     else ("thief-pass-22", "owner-pass-11"))
+        A.login(self.db, "0911111111", won)
+        with self.assertRaises(A.LoginFailed):
+            A.login(self.db, "0911111111", lost)
+
+    def test_a_password_change_racing_a_reset_does_not_outlive_it(self):
+        token = A.set_password_with_code(self.db, "0911111111", self.code, ALI_PW)
+        change = lambda conn: A.change_password(conn, token, ALI_PW, "thief-pass-11")
+        reset = lambda conn: A.issue_setup_code(conn, self.ali, admin_id=self.admin)
+        reset_first = lambda secret: time.sleep(0.2) if secret == "thief-pass-11" else None
+        with self.together(2, then=reset_first):
+            changed, code = self.at_once(change, reset)
+        self.assertIsInstance(changed, A.NotLoggedIn)
+        with self.assertRaises(A.LoginFailed):
+            A.login(self.db, "0911111111", "thief-pass-11")
+        with self.assertRaises(A.NotLoggedIn):
+            A.authenticate(self.db, token)
+        A.set_password_with_code(self.db, "0911111111", code, "owner-pass-22")
+
+    def test_a_right_password_in_a_burst_of_wrong_ones_is_locked_out(self):
+        A.set_password_with_code(self.db, "0911111111", self.code, ALI_PW)
+        tries = [f"guess-pass-{i}" for i in range(A.MAX_FAILED_LOGINS)] + [ALI_PW]
+        login = lambda password: lambda conn: A.login(conn, "0911111111", password)
+        right_last = lambda secret: time.sleep(0.3) if secret == ALI_PW else None
+        with self.together(len(tries), "verify_password", then=right_last):
+            results = self.at_once(*(login(password) for password in tries))
+        self.assertEqual({type(r) for r in results}, {A.LoginFailed}, results)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM login_attempts WHERE ok = 0").fetchone()[0],
+            A.MAX_FAILED_LOGINS)
 
 
 class ApiTests(unittest.TestCase):

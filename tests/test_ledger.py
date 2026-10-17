@@ -260,6 +260,8 @@ class LedgerTests(unittest.TestCase):
             L.reverse(self.db, dep, admin_id=self.admin, reason="again")
         with self.assertRaises(L.LedgerError):
             L.reverse(self.db, rev, admin_id=self.admin, reason="undo the undo")
+        with self.assertRaises(L.NotFound):
+            L.reverse(self.db, 999, admin_id=self.admin, reason="no such transaction")
         self.assertHealthy()
 
     def test_reversal_needs_a_reason(self):

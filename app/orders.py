@@ -201,7 +201,7 @@ def _supplier_account(conn, supplier_id):
 def _get_order(conn, order_id):
     row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
     if not row:
-        raise L.LedgerError("order not found")
+        raise L.NotFound("order not found")
     return row
 
 
@@ -267,6 +267,7 @@ def set_price(conn, currency, rate, *, admin_id, now=None, void_quotes=False):
     Every price ever set is kept. Quotes keep their price for QUOTE_MINUTES,
     unless void_quotes=True: then no quote taken before this price can be used
     (to correct a wrong price). Can be set while the currency is switched off."""
+    currency = _currency_code(currency)
     r = _decimal(rate, 6, "rate")
     if not isinstance(void_quotes, bool):
         raise L.LedgerError("void_quotes must be true or false")
@@ -313,6 +314,7 @@ def add_supplier(conn, name, country=None, *, admin_id):
 def set_supplier_price(conn, supplier_id, currency, rate, *, admin_id, now=None):
     """rate = LYD this supplier charges us for 1 unit of the currency, up to 6
     decimals. Every rate ever agreed is kept."""
+    currency = _currency_code(currency)
     r = _decimal(rate, 6, "rate")
     with L._write(conn):
         L._require_admin(conn, admin_id)
@@ -381,7 +383,7 @@ def place_order(conn, customer_id, quote_id, beneficiary_name, beneficiary_id, *
     with L._write(conn):
         q = conn.execute("SELECT * FROM quotes WHERE id = ?", (quote_id,)).fetchone()
         if not q or q["customer_id"] != customer_id:
-            raise L.LedgerError("quote not found")
+            raise L.NotFound("quote not found")
         existing = conn.execute("SELECT * FROM orders WHERE quote_id = ?",
                                 (quote_id,)).fetchone()
         if existing:
@@ -430,7 +432,7 @@ def assign_supplier(conn, order_id, supplier_id, *, admin_id, rate=None, now=Non
         _customer_not_blocked(conn, o)
         if not conn.execute("SELECT 1 FROM suppliers WHERE id = ? AND active = 1",
                             (supplier_id,)).fetchone():
-            raise L.LedgerError("supplier not found")
+            raise L.NotFound("supplier not found")
         if r is None:
             price = current_supplier_price(conn, supplier_id, o["currency"])
             if not price:
@@ -459,7 +461,7 @@ def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, now
         o = conn.execute("SELECT * FROM orders WHERE receipt_code = ?",
                          (code,)).fetchone()
         if not o:
-            raise L.LedgerError("receipt code not found")
+            raise L.NotFound("receipt code not found")
         if o["status"] == "placed":
             raise L.LedgerError("assign a supplier first")
         if o["status"] != "assigned":
@@ -575,8 +577,8 @@ def cancel_order(conn, order_id, *, admin_id, reason, now=None):
         L._require_admin(conn, admin_id)
         o = _get_order(conn, order_id)
         if o["status"] == "assigned":
-            raise L.LedgerError("order is with a supplier: check they have not paid, "
-                                "unassign it, then cancel")
+            raise L.Conflict("order is with a supplier: check they have not paid, "
+                             "unassign it, then cancel")
         if o["status"] != "placed":
             raise L.LedgerError(f"order is {o['status']}")
         rev = L._reverse(conn, o["charge_txn_id"], admin_id, reason)

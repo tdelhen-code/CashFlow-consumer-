@@ -73,7 +73,7 @@ class UserTests(unittest.TestCase):
         self.assertIsNone(L.find_user_by_phone(self.db, "0933333333"))
 
     def test_same_number_written_differently_is_a_duplicate(self):
-        with self.assertRaises(L.LedgerError):
+        with self.assertRaises(L.Conflict):
             L.create_user(self.db, "customer", "Ali again", "00218911111111",
                           admin_id=self.admin)
 

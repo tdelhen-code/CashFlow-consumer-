@@ -65,7 +65,7 @@ _BLANK = re.compile(r"[\s\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]*")
 ERROR_STATUS = [            # first match wins, so subclasses come first
     (A.WrongPassword, 403), (A.LoginFailed, 401), (A.NotLoggedIn, 401),
     (A.AccountLocked, 429),
-    (L.PermissionDenied, 403), (L.AccountBlocked, 403), (L.UnknownAccount, 404),
+    (L.PermissionDenied, 403), (L.AccountBlocked, 403), (L.NotFound, 404),
     (O.QuoteExpired, 409), (L.InsufficientFunds, 409), (L.NotEnoughCash, 409),
     (L.Conflict, 409), (L.LedgerError, 400),
 ]

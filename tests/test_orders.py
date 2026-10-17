@@ -124,7 +124,7 @@ class OrderTests(unittest.TestCase):
 
     def test_cannot_use_someone_elses_quote(self):
         q = O.get_quote(self.db, self.ali, "USD", "10", now=T0)
-        with self.assertRaises(L.LedgerError):
+        with self.assertRaises(L.NotFound):         # the same as no such quote
             O.place_order(self.db, self.sam, q["quote_id"], "X", "Y", now=T0)
 
     def test_not_enough_balance_creates_no_order(self):
@@ -156,14 +156,14 @@ class OrderTests(unittest.TestCase):
             O.mark_paid(self.db, o["receipt_code"], "REF", admin_id=self.admin)
 
     def test_unknown_receipt_code(self):
-        with self.assertRaises(L.LedgerError):
+        with self.assertRaises(L.NotFound):
             O.mark_paid(self.db, "NOTAREAL22", "REF", admin_id=self.admin)
 
     # --- cancellation ---
     def test_cancel_refunds_once(self):
         o = self.order()
         O.assign_supplier(self.db, o["id"], self.supplier, admin_id=self.admin)
-        with self.assertRaises(L.LedgerError):     # still with the supplier
+        with self.assertRaises(L.Conflict):        # still with the supplier
             O.cancel_order(self.db, o["id"], admin_id=self.admin, reason="offline")
         with self.assertRaises(L.LedgerError):     # a reason is required
             O.unassign_supplier(self.db, o["id"], admin_id=self.admin, reason=" ")
@@ -307,6 +307,18 @@ class OrderTests(unittest.TestCase):
             self.assertNotIsInstance(caught.exception, L.Conflict)
         with self.assertRaises(L.Conflict):
             O.add_currency(self.db, "usd", admin_id=self.admin)
+
+    def test_prices_take_a_currency_code_in_any_case(self):
+        O.set_price(self.db, " usd", "7.90", admin_id=self.admin, now=T0)
+        O.set_supplier_price(self.db, self.supplier, "egp ", "0.14", admin_id=self.admin)
+        self.assertEqual(O.current_price(self.db, "USD")["rate"], "7.90")
+        self.assertEqual(O.current_supplier_price(self.db, self.supplier, "EGP")["rate"],
+                         "0.14")
+        for bad in ("EURO", "", None, "GBP"):
+            with self.assertRaises(L.LedgerError, msg=repr(bad)):
+                O.set_price(self.db, bad, "1", admin_id=self.admin)
+            with self.assertRaises(L.LedgerError, msg=repr(bad)):
+                O.set_supplier_price(self.db, self.supplier, bad, "1", admin_id=self.admin)
 
     def test_supplier_names_are_unique(self):
         with self.assertRaises(L.Conflict):

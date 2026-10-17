@@ -51,8 +51,10 @@ Users (in `app/ledger.py`):
   they are typed (`find_user_by_phone`): spaces, dashes, dots, brackets and the
   invisible direction marks of a number copied from Arabic text are ignored, and
   Arabic-Indic or Persian digits (`٠٩١ ١٢٣ ٤٥٦٧`) are read as 0-9; any other
-  character (digits of other scripts, `²`) is refused. An optional WhatsApp
-  number can be from any country (`set_whatsapp`), read the same way;
+  character (digits of other scripts, `²`) is refused. A number already
+  registered, however it is typed, is refused as a conflict. An optional
+  WhatsApp number can be from any country (`set_whatsapp`), read the same way
+  and stored as `+<country code><number>`;
 - `block_user` / `unblock_user` freeze a worker while a problem or suspicion is
   checked: no sending, receiving, quotes, orders or cash, but salary and deposits
   still arrive; a blocked admin loses admin rights. Their open orders are held:
@@ -65,8 +67,9 @@ Users (in `app/ledger.py`):
   any money left on a deactivated account.
 
 An order with a supplier can't be cancelled or given to another supplier
-directly: `unassign_supplier` first, with a reason (after checking with the
-supplier that it wasn't paid), then `cancel_order` or `assign_supplier` again.
+directly (refused as a conflict): `unassign_supplier` first, with a reason
+(after checking with the supplier that it wasn't paid), then `cancel_order` or
+`assign_supplier` again. A paid or cancelled order can't be changed.
 Cancel and unassign reasons are for admins (admin log, admin statements): the
 worker's statement shows a reversal only as "Order cancelled" or, for an
 `/api/admin/reverse`, "Correction by admin".
@@ -137,8 +140,9 @@ In production, serve `make_app("/path/wallet.db", trust_proxy=True)` with a WSGI
 server (waitress, gunicorn) behind HTTPS (nginx, Caddy) that sets
 `X-Forwarded-For`; without `trust_proxy` every client looks like the proxy, so
 they all share one login limit. JSON in and out; POSTs must be
-`Content-Type: application/json` with a plain `Content-Length` (a negative or
-non-numeric one is a 400; none means an empty body). The session is an
+`Content-Type: application/json` (else 415) with a plain `Content-Length` of at
+most 64 KiB (a negative or non-numeric one is a 400, a larger one a 413; none
+means an empty body). The session is an
 HttpOnly, SameSite=Strict cookie (found among any other cookies the browser
 sends), or `Authorization: Bearer <token>`.
 
@@ -157,36 +161,52 @@ most 100 characters for `name`, `beneficiary_name`, `beneficiary_id`,
 `receipt_code`), 500 for a `reason`, and 200 for a `note`, `idempotency_key`
 or any other text. Amounts and rates are text such as `"12.5"` (a whole JSON
 number is taken too, a fraction such as `12.5` is not: it may not be exactly
-what was typed); ids are whole numbers. An optional field sent as `""` or
+what was typed); ids (`user_id`, `txn_id`, `supplier_id`) are whole numbers,
+and a `quote_id` is the text `/api/quote` returned. Currency codes are read in
+any case (`usd` is `USD`). An optional field (marked `?` below) sent as `""` or
 only spaces counts as left out: no WhatsApp number, the agreed rate on assign,
-no fee. `.../whatsapp` needs its field: `null` or `""` removes the number, and
-a body without it is a 400 that changes nothing.
+no fee (but not `idempotency_key`, see below). Lists (`/api/statement`,
+`/api/orders`, the admin statements and `/api/admin/orders`) take `?limit=`
+(default 50, at most 200). `.../whatsapp` needs its field: `null` or `""`
+removes the number, and a body without it is a 400 that changes nothing.
 
 Errors: `{"error", "type"}` with 400 (bad input: a field missing, of the wrong
-type or too long), 401 (log in; also a wrong or unknown login, or a locked
-one), 403 (not allowed / blocked, including a blocked worker's order;
-`WrongPassword` for a wrong current password on change-password, which doesn't
-log out), 404 (also a colleague to send to who is blocked or closed, like an
-unknown number), 409 (balance, cash, quote expired or price corrected, already
-exists, payroll batch already posted, quote already used for another
-beneficiary, order already with a supplier or with another one than given,
-password changed meanwhile), 413, 415, 429 (see the limits; `AccountLocked`
-when a logged-in user's current-password tries are locked), 500 (nothing
-internal shown).
+type or too long, or a rule not met, such as a currency that isn't offered, an
+order that is already paid or cancelled, or an idempotency key reused with
+other details), 401 (log in; also a wrong or unknown login, a locked one, or a
+session ended by blocking, deactivating or a new setup code), 403 (not allowed /
+blocked: a worker on an admin route or an admin on a worker's one, a blocked
+user logging in, a blocked worker's order, an admin blocked or deactivated
+while their request was under way; `WrongPassword` for a wrong current password
+on change-password, which doesn't log out), 404 (no such user, worker account (also a closed worker's),
+bank or till, supplier, order, quote (also another worker's), receipt code,
+transaction or path; also a colleague to send to who is blocked or closed, like
+an unknown number), 405 (a known path with another method, such as
+`GET /api/login`), 409 (balance, cash, quote expired or price corrected,
+already exists (a till, currency, supplier, or a phone number already
+registered), payroll batch already posted, quote already used for another
+beneficiary, order already with a supplier (to assign or cancel it, unassign
+it first) or with another one than given, password changed meanwhile), 413 (a
+body over 64 KiB), 415 (a POST that isn't `application/json`), 429 (see the
+limits; `AccountLocked` when a logged-in user's current-password tries are
+locked), 500 (nothing internal shown).
 
 `idempotency_key` (text, at most 200 characters) is required on `POST /api/send`
 and on the admin money routes `/api/admin/deposit`, `/payroll`, `/withdraw`,
 `/move` and `/suppliers/<id>/pay`: the screen makes one per confirmation, so a
-double click or a retry posts once. It is optional on `/api/admin/reverse` (a
-transaction can be reversed only once anyway). A missing or blank key is a 400.
+double click or a retry posts once. The same key again with the same details
+answers with the first `txn_id`; with other details it is a 400. Keys are kept
+apart per sender, so two workers can't collide. It is optional on
+`/api/admin/reverse` (a transaction can be reversed only once anyway). A
+missing key (where required) or a blank one is a 400.
 
 | | |
 |---|---|
-| Everyone | `POST /api/login`, `/api/setup-password`, `/api/logout`, `/api/logout-everywhere`, `/api/change-password` |
-| Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send`, `/api/quote`, `/api/orders` |
-| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`; `POST /api/admin/users` (returns the setup code; `reason` optional, "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (`{reason}`: lifts a lock from wrong tries) |
-| Admin: money | `POST /api/admin/deposit`, `/payroll`, `/withdraw`, `/move`, `/reverse`, `/tills`, `/reconcile`; `GET /api/admin/health` |
-| Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`), `/suppliers`, `/suppliers/<id>/price`, `/suppliers/<id>/pay`, `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?}`); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
+| Everyone | `POST /api/login` (`{phone, password}`), `/api/setup-password` (`{phone, code, password}`), `/api/logout` (this session), `/api/logout-everywhere` (every session of this user), `/api/change-password` (`{old_password, new_password}`; ends the other sessions) |
+| Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id}`) |
+| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`; `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `ar` (default), `en` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
+| Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` |
+| Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?}`); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
 
 Not built yet: suppliers paid in foreign currency instead of LYD, approvals
 (such as a second admin approving a reset of an admin's account), screens
