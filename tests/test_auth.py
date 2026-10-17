@@ -329,6 +329,31 @@ class AuthTests(unittest.TestCase):
                     attempt()
             self.assertEqual(spy.call_count, 1)
 
+    def test_a_hash_from_before_scrypt_was_raised_takes_as_long_to_check(self):
+        A.issue_setup_code(self.db, self.sam, admin_id=self.admin, now=T0)
+
+        def work(attempt):          # scrypt work done, in units of n * r * p
+            with unittest.mock.patch("hashlib.scrypt", wraps=hashlib.scrypt) as spy:
+                with self.assertRaises(A.LoginFailed):
+                    attempt()
+            return sum(c.kwargs["n"] * c.kwargs["r"] * c.kwargs["p"]
+                       for c in spy.call_args_list)
+
+        def login(phone):
+            return lambda: A.login(self.db, phone, "wrong-password", now=T0)
+
+        def code(phone):
+            return lambda: A.set_password_with_code(self.db, phone, "WRONG-CODE-2345",
+                                                    "pass-word-1", now=T0)
+        # Ali's password and Sam's code were hashed at the old cost.
+        for raised in (dict(A.SCRYPT, n=A.SCRYPT["n"] * 2), dict(A.SCRYPT, p=3),
+                       dict(A.SCRYPT, n=A.SCRYPT["n"] * 2, p=3)):
+            with unittest.mock.patch.object(A, "SCRYPT", raised):
+                A._dummy_hash()             # made up front, as at import
+                done = {work(login("0911111111")), work(login("0933333333")),
+                        work(code("0922222222")), work(code("0933333333"))}
+            self.assertEqual(done, {raised["n"] * raised["r"] * raised["p"]}, raised)
+
     # --- admin unlock ---
     def test_admin_can_unlock_a_locked_account(self):
         for _ in range(A.MAX_FAILED_LOGINS):
@@ -348,6 +373,53 @@ class AuthTests(unittest.TestCase):
         self.assertEqual((row["admin_id"], row["target"], json.loads(row["details"])),
                          (self.admin, str(self.ali),
                           {"reason": "Ali called: someone keeps guessing"}))
+
+    # --- a lock is per client, so a stranger can't lock the owner out ---
+    def test_wrong_tries_lock_only_the_client_that_made_them(self):
+        stranger, home = "203.0.113.1", "198.51.100.7"
+        for _ in range(A.MAX_FAILED_LOGINS):
+            with self.assertRaises(A.LoginFailed):
+                A.login(self.db, "0911111111", "wrong-password", now=T0, client=stranger)
+        with self.assertRaises(A.LoginFailed):
+            A.login(self.db, "0911111111", ALI_PW, now=T0, client=stranger)
+        token = A.login(self.db, "0911111111", ALI_PW, now=T0, client=home)
+        with self.assertRaises(A.LoginFailed):          # Ali's login doesn't free the stranger
+            A.login(self.db, "0911111111", ALI_PW, now=T0, client=stranger)
+        with self.assertRaises(A.AccountLocked):
+            A.change_password(self.db, token, ALI_PW, "new-wallet-11", now=T0,
+                              client=stranger)
+        A.change_password(self.db, token, ALI_PW, "new-wallet-11", now=T0, client=home)
+        rows = self.db.execute("SELECT client, ok FROM login_attempts WHERE phone = ? "
+                               "ORDER BY id DESC LIMIT 2", ("+218911111111",)).fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(home, 1), (home, 1)])
+
+    def test_many_clients_together_lock_the_phone_until_a_setup_code(self):
+        home, cafe = "198.51.100.7", "198.51.100.8"
+        A.login(self.db, "0911111111", ALI_PW, now=T0, client=home)    # Ali's usual address
+        for i in range(A.MAX_FAILED_LOGINS_EVERYWHERE):
+            with self.assertRaises(A.LoginFailed):
+                A.login(self.db, "0911111111", "wrong-password", now=T0,
+                        client=f"203.0.113.{i // A.MAX_FAILED_LOGINS}")
+        with self.assertRaises(A.LoginFailed):          # an address Ali never used
+            A.login(self.db, "0911111111", ALI_PW, now=T0, client=cafe)
+        A.login(self.db, "0911111111", ALI_PW, now=T0, client=home)    # spared there
+        for _ in range(A.MAX_FAILED_LOGINS):
+            with self.assertRaises(A.LoginFailed):
+                A.login(self.db, "0911111111", "wrong-password", now=T0, client=home)
+        with self.assertRaises(A.LoginFailed):          # but not from its own wrong tries
+            A.login(self.db, "0911111111", ALI_PW, now=T0, client=home)
+        later = T0 + timedelta(minutes=A.LOCK_MINUTES, seconds=1)
+        A.login(self.db, "0911111111", ALI_PW, now=later, client=cafe)     # it ends
+        for i in range(A.MAX_FAILED_LOGINS_EVERYWHERE):
+            with self.assertRaises(A.LoginFailed):
+                A.login(self.db, "0911111111", "wrong-password", now=later, client=f"x{i}")
+        with self.assertRaises(A.LoginFailed):
+            A.login(self.db, "0911111111", ALI_PW, now=later, client="x0")
+        code = A.issue_setup_code(self.db, self.ali, admin_id=self.admin, now=later)
+        A.set_password_with_code(self.db, "0911111111", code, "brand-new-1", now=later,
+                                 client="x1")
+        for client in ("x0", "x2"):                     # a right code lifts every lock
+            A.login(self.db, "0911111111", "brand-new-1", now=later, client=client)
 
     # --- admins and setup codes ---
     def test_setup_codes_are_logged_and_need_a_reason_for_admins(self):
@@ -371,13 +443,19 @@ class AuthTests(unittest.TestCase):
         code = A.issue_setup_code(self.db, self.sam, admin_id=self.admin, now=T0)
         for bad in ("123456789", "1234567890", "9876543210", "qwertyuiop", "QWERTYUIOP",
                     "azertyuiop", "Password123", "iloveyou123", "sam+218922222222",
-                    "my 092 222 2222"):
+                    "my 092 222 2222", "12345678910", "1234567891", "10987654321",
+                    "Password1!", "Qwerty123!", "!P@ssw0rd2026", "Tripoli2026",
+                    "asdf123456", "123123123123", "abcabcabca", "1q2w3e4r5t6y",
+                    "!@#$%^&*()", "1qaz2wsx3edc4rfv"):
             with self.assertRaises(L.LedgerError, msg=bad):
                 A.set_password_with_code(self.db, "0922222222", code, bad, now=T0)
         A.set_password_with_code(self.db, "0922222222", code, "fine-pass-1", now=T0)
 
     def test_scrypt_cost_is_strong_by_default(self):
-        self.assertGreaterEqual(STRONG_SCRYPT["n"], 2**15)
+        # At least one of OWASP's minimums for scrypt (N, p), all with r=8.
+        minimums = [(2**17, 1), (2**16, 2), (2**15, 3), (2**14, 5), (2**13, 10)]
+        self.assertTrue(any(STRONG_SCRYPT["n"] >= n and STRONG_SCRYPT["p"] >= p
+                            for n, p in minimums), STRONG_SCRYPT)
         self.assertGreaterEqual(STRONG_SCRYPT["r"], 8)
         with unittest.mock.patch.object(A, "SCRYPT", STRONG_SCRYPT):
             stored = A.hash_password("strong-pass-1")

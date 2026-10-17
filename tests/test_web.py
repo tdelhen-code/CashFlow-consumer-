@@ -33,7 +33,7 @@ class Client:
                    "REMOTE_ADDR": self.ip, "CONTENT_TYPE": content_type,
                    "CONTENT_LENGTH": str(len(data)), "wsgi.input": io.BytesIO(data)}
         if self.cookie:
-            environ["HTTP_COOKIE"] = f"session={self.cookie}"
+            environ["HTTP_COOKIE"] = f"{self.app.cookie_name}={self.cookie}"
         environ.update(headers or {})
         setup_testing_defaults(environ)
         captured = {}
@@ -158,8 +158,10 @@ class WebTests(unittest.TestCase):
         client = Client(self.app)
         client.post("/api/login", {"phone": "0910000000", "password": "Office-Pass-2026"})
         cookie = client.headers["Set-Cookie"]
+        self.assertTrue(cookie.startswith("__Host-session="), cookie)
         for part in ("HttpOnly", "SameSite=Strict", "Secure", "Path=/"):
             self.assertIn(part, cookie)
+        self.assertNotIn("Domain", cookie)
         self.assertEqual(client.get("/api/admin/users")[0], 200)
         client.post("/api/logout")
         self.assertIsNone(client.cookie)
@@ -428,22 +430,43 @@ class WebTests(unittest.TestCase):
                               for _ in range(A.MAX_FAILED_LOGINS + 1)]
         self.assertEqual(answers["0911111111"], answers["0933333333"])
         self.assertEqual({status for status, _ in answers["0911111111"]}, {401})
-        locked = Client(self.app, ip="198.51.100.7").post(
+        locked = Client(self.app, ip="203.0.113.1").post(
             "/api/login", {"phone": "0911111111", "password": "ali-wallet-77"})
         self.assertEqual(locked, answers["0933333333"][-1])
 
     def test_admin_unlocks_a_locked_worker(self):
         ali_id, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
-        attacker = Client(self.app, ip="203.0.113.1")
+        laptop = Client(self.app, ip="203.0.113.1")         # Ali mistyped there
         for _ in range(A.MAX_FAILED_LOGINS):
-            attacker.post("/api/login", {"phone": "0911111111", "password": "guess-guess-1"})
+            laptop.post("/api/login", {"phone": "0911111111", "password": "guess-guess-1"})
         login = {"phone": "0911111111", "password": "ali-wallet-77"}
-        self.assertEqual(Client(self.app).post("/api/login", login)[0], 401)
+        self.assertEqual(laptop.post("/api/login", login)[0], 401)
         path = f"/api/admin/users/{ali_id}/unlock"
         self.assertEqual(ali.post(path, {"reason": "it's me"})[0], 403)
         self.assertEqual(self.admin.post(path, {})[0], 400)
-        self.assertEqual(self.admin.post(path, {"reason": "someone kept guessing"})[0], 200)
-        self.assertEqual(Client(self.app).post("/api/login", login)[0], 200)
+        self.assertEqual(self.admin.post(path, {"reason": "Ali mistyped"})[0], 200)
+        self.assertEqual(laptop.post("/api/login", login)[0], 200)
+
+    def test_a_strangers_wrong_tries_dont_lock_the_owner_out(self):
+        attacker = Client(self.app, ip="203.0.113.1")
+        owner = {"phone": "0910000000", "password": "Office-Pass-2026"}
+        for _ in range(A.MAX_FAILED_LOGINS):
+            attacker.post("/api/login", dict(owner, password="guess-guess-1"))
+        home = Client(self.app, ip="198.51.100.7")
+        self.assertEqual(home.post("/api/login", owner)[0], 200)
+        self.assertEqual(attacker.post("/api/login", owner)[0], 401)    # still locked there
+        # Guessing from many addresses together locks the phone for every
+        # address the owner never logged in from, until an admin lifts it.
+        for i in range(A.MAX_FAILED_LOGINS, A.MAX_FAILED_LOGINS_EVERYWHERE):  # 5 made above
+            client = Client(self.app, ip=f"203.0.114.{i // A.MAX_FAILED_LOGINS}")
+            self.assertEqual(client.post("/api/login", dict(
+                owner, password="guess-guess-2"))[0], 401)
+        travelling = Client(self.app, ip="192.0.2.50")
+        self.assertEqual(travelling.post("/api/login", owner)[0], 401)
+        self.assertEqual(home.post("/api/login", owner)[0], 200)        # spared there
+        self.assertEqual(home.post("/api/admin/users/1/unlock",
+                                   {"reason": "someone keeps guessing"})[0], 200)
+        self.assertEqual(travelling.post("/api/login", owner)[0], 200)
 
     def test_change_password_tries_are_limited(self):
         _, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
@@ -533,6 +556,30 @@ class WebTests(unittest.TestCase):
             self.assertEqual(ali.post("/api/send", {"to_phone": "0922222222", "amount": "1",
                                                     "idempotency_key": "race"}), unknown)
         self.assertEqual(ali.get("/api/me")[1]["balance"]["lyd"], "10.000")
+        # Nor does a wrong amount tell a blocked colleague from an unknown number.
+        for phone in ("0922222222", "0944444444"):
+            self.assertEqual(ali.post("/api/send", {"to_phone": phone, "amount": "abc",
+                                                    "idempotency_key": "bad"}), unknown)
+
+    def test_a_retried_send_answers_even_if_the_colleague_was_blocked_since(self):
+        ali_id, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        sam_id, _ = self.new_worker("Sam", "0922222222", "sam-wallet-88")
+        self.admin.post("/api/admin/deposit", {"user_id": ali_id, "amount": "100",
+                                               "into": "BANK", "idempotency_key": "d1"})
+        send = {"to_phone": "0922222222", "amount": "10", "idempotency_key": "k1"}
+        status, first = ali.post("/api/send", send)
+        self.assertEqual(status, 200, first)
+        # The answer is lost; meanwhile Sam is blocked; Ali's app sends it again.
+        self.assertEqual(self.admin.post(f"/api/admin/users/{sam_id}/block",
+                                         {"reason": "doubt"})[0], 200)
+        status, again = ali.post("/api/send", send)
+        self.assertEqual((status, again["txn_id"]), (200, first["txn_id"]))
+        self.assertEqual((self.lyd(ali), self.lyd(user_id=sam_id)), ("90.000", "10.000"))
+        unknown = (404, {"error": "no worker with that phone number",
+                         "type": "UnknownAccount"})
+        for changed in ({"idempotency_key": "k2"}, {"amount": "11"}):   # not a retry
+            self.assertEqual(ali.post("/api/send", dict(send, **changed)), unknown)
+        self.assertEqual(self.lyd(ali), "90.000")
 
     # --- wrong types, odd input and limits never crash the server ---
     def test_wrong_json_types_are_refused_not_crashed(self):
@@ -729,8 +776,12 @@ class WebTests(unittest.TestCase):
     def test_only_failed_logins_count_against_an_address(self):
         office = Client(self.app, ip="198.51.100.20")
         login = {"phone": "0910000000", "password": "Office-Pass-2026"}
-        for _ in range(web.LOGIN_TRIES_PER_IP + 5):         # a whole office logging in
-            self.assertEqual(office.post("/api/login", login)[0], 200)
+        staff = [{"phone": f"09{n}1234567", "password": f"staff-pass-{n}"}
+                 for n in range(1, 6)]
+        for worker in staff:
+            self.new_worker("Staff", worker["phone"], worker["password"])
+        for i in range(web.LOGIN_TRIES_PER_IP + 5):         # a whole office logging in
+            self.assertEqual(office.post("/api/login", staff[i % 5])[0], 200)
         for _ in range(web.LOGIN_TRIES_PER_IP + 5):         # refused before any check
             self.assertEqual(office.post("/api/login", {})[0], 400)
         self.assertEqual(office.post("/api/login", login)[0], 200)
@@ -738,6 +789,34 @@ class WebTests(unittest.TestCase):
             self.assertEqual(office.post("/api/login", {"phone": f"09{i % 5 + 1}1234567",
                                                         "password": "guess-guess"})[0], 401)
         self.assertEqual(office.post("/api/login", login)[0], 429)
+
+    def test_successful_logins_are_limited_per_account(self):
+        _, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")   # one: the setup
+        login = {"phone": "0911111111", "password": "ali-wallet-77"}
+        stranger = Client(self.app, ip="203.0.113.5")
+        for _ in range(A.MAX_FAILED_LOGINS - 1):            # wrong ones don't use them up
+            self.assertEqual(stranger.post("/api/login", dict(
+                login, password="guess-guess-1"))[0], 401)
+        loop = Client(self.app, ip="198.51.100.30")
+        for _ in range(web.LOGINS_PER_ACCOUNT - 1):
+            self.assertEqual(loop.post("/api/login", login)[0], 200)
+        for client, body in ((Client(self.app, ip="198.51.100.31"),       # from anywhere,
+                              dict(login, phone="+218 91 111 1111")),     # however typed
+                             (loop, login)):
+            status, answer = client.post("/api/login", body)
+            self.assertEqual((status, answer["type"]), (429, "http"))
+        status, answer = ali.post("/api/change-password", {
+            "old_password": "ali-wallet-77", "new_password": "ali-wallet-78"})
+        self.assertEqual((status, answer["type"]), (429, "http"))
+        self.assertEqual(ali.get("/api/me")[0], 200)       # the open sessions still work
+        self.assertEqual(loop.post("/api/login", {"phone": "0910000000",
+                                                  "password": "Office-Pass-2026"})[0], 200)
+        conn = A.connect(self.db_path)
+        self.addCleanup(conn.close)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM sessions s JOIN users u "
+                                      "ON u.id = s.user_id WHERE u.phone = ?",
+                                      ("+218911111111",)).fetchone()[0],
+                         web.LOGINS_PER_ACCOUNT)
 
     def test_ipv6_addresses_count_per_64_block(self):
         login = {"phone": "0910000000", "password": "Office-Pass-2026"}
@@ -780,16 +859,47 @@ class WebTests(unittest.TestCase):
                                                        "password": "Office-Pass-2026"})
         token = body["token"]
         bare = Client(self.app)
-        for header in (f'prefs={{"lang":"ar"}}; theme=dark mode; session={token}',
-                       f"version=1; session={token}", f"path=/x; session={token}",
-                       f"x; session={token}", f"x=café; session={token}",
-                       f'x="unterminated; session={token}', f'session="{token}"',
-                       f"session=; session={token}"):
+        for header in (f'prefs={{"lang":"ar"}}; theme=dark mode; __Host-session={token}',
+                       f"version=1; __Host-session={token}",
+                       f"path=/x; __Host-session={token}", f"x; __Host-session={token}",
+                       f"x=café; __Host-session={token}",
+                       f'x="unterminated; __Host-session={token}',
+                       f'__Host-session="{token}"', f"__Host-session=; __Host-session={token}",
+                       f"__Host-session={token}; __Host-session={token}"):
             status, answer = bare.get("/api/admin/users", headers={"HTTP_COOKIE": header})
             self.assertEqual(status, 200, (header, answer))
-        for header in (f"xsession={token}", "session=wrong", ""):
+        for header in (f"x__Host-session={token}", "__Host-session=wrong", "",
+                       f"session={token}"):         # the plain name: anyone could set it
             status, _ = bare.get("/api/admin/users", headers={"HTTP_COOKIE": header})
             self.assertEqual(status, 401, header)
+
+    def test_a_planted_session_cookie_is_never_taken(self):
+        # A session cookie planted from another subdomain, with a longer Path,
+        # comes first in the header, before the app's own: Ali would then act
+        # in Sam's account (his orders' beneficiaries would land there).
+        _, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        _, sam = self.new_worker("Sam", "0922222222", "sam-wallet-88")      # plants his own
+        bare = Client(self.app)
+
+        def me(client, header):
+            status, body = client.get("/api/me", headers={"HTTP_COOKIE": header})
+            return status, body.get("name")
+        # Over https the session is the __Host- cookie, which a browser takes
+        # only from this very host; a plain `session` cookie is not read.
+        self.assertEqual(me(bare, f"session={sam.cookie}; __Host-session={ali.cookie}"),
+                         (200, "Ali"))
+        self.assertEqual(me(bare, f"__Host-session={sam.cookie}; "
+                                  f"__Host-session={ali.cookie}"), (401, None))
+        # Over plain http (local testing) it keeps the plain name, so two
+        # different ones count as not logged in.
+        local = Client(web.App(self.db_path, secure_cookies=False))
+        self.addCleanup(local.app.close_connection)
+        local.post("/api/login", {"phone": "0911111111", "password": "ali-wallet-77"})
+        cookie = local.headers["Set-Cookie"]
+        self.assertTrue(cookie.startswith("session=") and "Secure" not in cookie, cookie)
+        self.assertEqual(me(local, f"session={local.cookie}"), (200, "Ali"))
+        self.assertEqual(me(local, f"session={sam.cookie}; session={local.cookie}"),
+                         (401, None))
 
     def test_bundled_server_keeps_database_connections(self):
         server = web.dev_server(self.app, "127.0.0.1", 0)

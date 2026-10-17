@@ -10,9 +10,14 @@
   from a copy of the database; session tokens are stored only as hashes, so a
   copy of the database can't be used to log in.
 - 5 wrong tries in a row (password, setup code, or the current password when
-  changing it) lock that phone number for 15 minutes, registered or not. An
-  unknown phone, a wrong password and a locked account get the same answer.
-  A right setup code still works and lifts the lock; so can an admin.
+  changing it) from one client (the web: one address) lock that phone number
+  for that client for 15 minutes, registered or not, so a stranger elsewhere
+  can't lock its owner out. 50 wrong tries within 15 minutes from all clients
+  together lock it for every client that never gave its right password, so
+  guessing spread over many addresses stays slow while the owner can still log
+  in from where they did before. An unknown phone, a wrong password and a
+  locked account get the same answer. A right setup code still works and lifts
+  every lock; so can an admin.
 - A blocked or deactivated user can't log in, and their open sessions stop
   working at once. Changing or resetting a password ends the other sessions.
 """
@@ -29,7 +34,8 @@ from . import orders as O
 
 MIN_PASSWORD_LENGTH = 10
 MAX_PASSWORD_LENGTH = 128
-MAX_FAILED_LOGINS = 5
+MAX_FAILED_LOGINS = 5            # wrong tries in a row from one client
+MAX_FAILED_LOGINS_EVERYWHERE = 50   # wrong tries from all clients together
 LOCK_MINUTES = 15
 SETUP_CODE_HOURS = 72
 SETUP_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I
@@ -37,13 +43,15 @@ SETUP_CODE_LENGTH = 12                                    # shown as XXXX-XXXX-X
 SESSION_HOURS = {"customer": 24 * 7, "admin": 8}
 ADMIN_IDLE_MINUTES = 30
 LAST_SEEN_SECONDS = 60          # a session's last activity is written at most this often
-SCRYPT = {"n": 2**15, "r": 8, "p": 1}       # 32 MiB and about 0.1 s per hash
+SCRYPT = {"n": 2**15, "r": 8, "p": 3}       # one of OWASP's minimums: 32 MiB, about 0.3 s
 SCRYPT_MAXMEM = 64 * 1024 * 1024
 MAX_PARALLEL_HASHES = 4         # so many logins at once can't use up the memory
 LOGIN_FAILED = "wrong phone number or password, or too many wrong tries: wait 15 minutes"
 
-# Refused whatever the case: much-used passwords, and runs of keys or digits
-# ("qwertyuiop", "1234567890", "azertyuiop"...).
+# Refused whatever the case: much-used passwords, runs of keys or digits
+# ("qwertyuiop", "1234567890", "azertyuiop", "1q2w3e4r5t6y"...), counting
+# ("12345678910"), a short piece repeated ("123123123123"), and a much-used
+# word with only digits or symbols around it ("Password1!", "Qwerty123!").
 COMMON_PASSWORDS = frozenset("""
 1234567890 0123456789 1234554321 1234512345 1122334455 1111122222 1q2w3e4r5t
 q1w2e3r4t5 1qaz2wsx3edc qwerty1234 qwerty12345 qwerty123456 password12
@@ -54,7 +62,15 @@ monkey1234 dragon1234 changeme12 libya12345 libya123456 tripoli123 benghazi123
 """.split())
 KEY_RUNS = ("01234567890123456789", "98765432109876543210",
             "abcdefghijklmnopqrstuvwxyz", "zyxwvutsrqponmlkjihgfedcba",
-            "qwertyuiopasdfghjklzxcvbnm", "azertyuiopqsdfghjklmwxcvbn")
+            "qwertyuiopasdfghjklzxcvbnm", "azertyuiopqsdfghjklmwxcvbn",
+            "1q2w3e4r5t6y7u8i9o0p", "q1w2e3r4t5y6u7i8o9p0", "!@#$%^&*()_+",
+            "1qaz2wsx3edc4rfv5tgb6yhn7ujm8ik9ol0p", "qazwsxedcrfvtgbyhnujmikolp")
+COUNTING = ("".join(map(str, range(100))), "".join(map(str, range(99, -1, -1))))
+COMMON_WORDS = frozenset("""
+password passwort passw0rd p@ssword p@ssw0rd pa55word qwerty azerty iloveyou
+welcome letmein admin administrator princess football sunshine monkey dragon
+changeme master secret superman batman libya tripoli benghazi
+""".split())
 
 
 class LoginFailed(L.LedgerError):
@@ -100,9 +116,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   id INTEGER PRIMARY KEY,
   phone TEXT NOT NULL,                -- as stored for users, registered or not
   at TEXT NOT NULL,
-  ok INTEGER NOT NULL
+  ok INTEGER NOT NULL,
+  client TEXT                         -- who tried (the web: their address); an ok
+                                      -- row without one lifts every lock
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_phone ON login_attempts(phone);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_known ON login_attempts(phone, client)
+  WHERE ok = 1;
 """
 
 
@@ -139,12 +159,25 @@ def _check_password_rules(password, phone=None):
         raise L.LedgerError("password is too long")
     if len(set(password)) < 3:
         raise L.LedgerError("password is too simple")
-    lower = password.lower()
-    if lower in COMMON_PASSWORDS or any(lower in run for run in KEY_RUNS):
+    if _too_common(password.lower()):
         raise L.LedgerError("password is too common; choose another")
     if phone and (phone[-9:] in re.sub(r"\D", "", password)
                   or password.lstrip("+0") in phone):
         raise L.LedgerError("password can't contain your phone number")
+
+
+def _too_common(lower):
+    """True for a much-used password (see COMMON_PASSWORDS), also with symbols
+    around it."""
+    word = re.sub(r"^[\d\W_]+|[\d\W_]+$", "", lower)     # without digits or symbols around
+    if word in COMMON_WORDS or (len(word) >= 4 and any(word in run for run in KEY_RUNS)):
+        return True
+    for text in {lower, re.sub(r"^[\W_]+|[\W_]+$", "", lower)}:
+        if text and (text in COMMON_PASSWORDS or any(text in run for run in KEY_RUNS)
+                     or (text.isdigit() and any(text in run for run in COUNTING))
+                     or re.fullmatch(r"(.{1,4})\1{2,}.{0,2}", text)):
+            return True
+    return False
 
 
 _hashing = threading.BoundedSemaphore(MAX_PARALLEL_HASHES)
@@ -169,10 +202,22 @@ def hash_password(password):
 def verify_password(password, stored):
     try:
         _, n, r, p, salt, digest = stored.split("$")
+        n, r, p = int(n), int(r), int(p)
         expected = base64.b64decode(digest)
-        actual = _scrypt(password, base64.b64decode(salt), int(n), int(r), int(p))
+        actual = _scrypt(password, base64.b64decode(salt), n, r, p)
     except (ValueError, AttributeError):
         return False
+    # A hash made before SCRYPT was raised is cheaper to check than the dummy
+    # an unknown phone is checked against. The work it falls short is done as
+    # well (lanes at the current cost, the rest at its own), so the time
+    # doesn't tell who is registered, right password or not.
+    short = SCRYPT["n"] * SCRYPT["r"] * SCRYPT["p"] - n * r * p
+    if short > 0:
+        lanes, rest = divmod(short, SCRYPT["n"] * SCRYPT["r"])
+        if lanes:
+            _scrypt("", b"same time", SCRYPT["n"], SCRYPT["r"], lanes)
+        if rest:
+            _scrypt("", b"same time", n, r, -(-rest // (n * r)))
     return hmac.compare_digest(actual, expected)
 
 
@@ -209,31 +254,46 @@ def create_first_admin(conn, name, phone, password, language="ar"):
 
 # ---------- lockout ----------
 
-def _locked_until(conn, phone, now):
-    """When the phone unlocks, or None. Counts failures since the last
-    successful login within the lock window."""
+def _locked_until(conn, phone, now, client=None):
+    """When the phone unlocks for `client`, or None. Within the lock window it
+    counts this client's failures since its last successful try, and everyone's
+    failures; a lock lifted for everyone (an admin, a right setup code) ends
+    both counts. So a stranger's wrong tries lock only the stranger out, and
+    everyone's lock spares a client that has given the right password before
+    (the owner's usual address): only its own tries lock it."""
     since = (now - timedelta(minutes=LOCK_MINUTES)).isoformat()
     rows = conn.execute(
-        "SELECT at, ok FROM login_attempts WHERE phone = ? AND at > ? "
+        "SELECT at, ok, client FROM login_attempts WHERE phone = ? AND at > ? "
         "ORDER BY id DESC", (phone, since)).fetchall()
-    failures = []
+    mine, everyone, mine_ended = [], [], False
     for row in rows:
+        if row["ok"] and row["client"] is None:
+            break                                   # lifted for everyone
         if row["ok"]:
-            break
-        failures.append(row["at"])
-    if len(failures) < MAX_FAILED_LOGINS:
-        return None
-    return datetime.fromisoformat(failures[0]) + timedelta(minutes=LOCK_MINUTES)
+            mine_ended = mine_ended or row["client"] == client
+            continue
+        everyone.append(row["at"])
+        if row["client"] == client and not mine_ended:
+            mine.append(row["at"])
+    known = client is not None and conn.execute(
+        "SELECT 1 FROM login_attempts WHERE phone = ? AND client = ? AND ok = 1 LIMIT 1",
+        (phone, client)).fetchone() is not None
+    for failures, limit in ((mine, MAX_FAILED_LOGINS),
+                            ([] if known else everyone, MAX_FAILED_LOGINS_EVERYWHERE)):
+        if len(failures) >= limit:
+            return datetime.fromisoformat(failures[0]) + timedelta(minutes=LOCK_MINUTES)
+    return None
 
 
-def _record_attempt(conn, phone, ok, now):
-    conn.execute("INSERT INTO login_attempts(phone, at, ok) VALUES (?,?,?)",
-                 (phone, now.isoformat(), 1 if ok else 0))
+def _record_attempt(conn, phone, ok, now, client=None):
+    """client None on a successful try lifts the lock for everyone."""
+    conn.execute("INSERT INTO login_attempts(phone, at, ok, client) VALUES (?,?,?,?)",
+                 (phone, now.isoformat(), 1 if ok else 0, client))
 
 
-def _check_not_locked(conn, phone, now):
+def _check_not_locked(conn, phone, now, client=None):
     """For someone already logged in; logins just say LOGIN_FAILED."""
-    until = _locked_until(conn, phone, now)
+    until = _locked_until(conn, phone, now, client)
     if until and until > now:
         raise AccountLocked(f"too many wrong tries; try again after {until:%H:%M} UTC")
 
@@ -246,7 +306,7 @@ def unlock_login(conn, user_id, *, admin_id, reason, now=None):
     with L._write(conn):
         L._require_admin(conn, admin_id)
         user = L._user(conn, user_id)
-        _record_attempt(conn, user["phone"], True, now)     # ends the run of wrong tries
+        _record_attempt(conn, user["phone"], True, now)     # lifts every lock
         L._log(conn, admin_id, "unlock_login", user_id, reason=reason)
 
 
@@ -286,10 +346,11 @@ def issue_setup_code(conn, user_id, *, admin_id, reason=None, now=None):
     return "-".join(code[i:i + 4] for i in range(0, len(code), 4))
 
 
-def set_password_with_code(conn, phone, code, new_password, *, now=None):
+def set_password_with_code(conn, phone, code, new_password, *, now=None, client=None):
     """Worker chooses their password with the setup code. Logs them in:
     returns a session token. A right code works even while the phone is
-    locked by wrong tries, and lifts the lock; a wrong one counts as one."""
+    locked by wrong tries, and lifts every lock; a wrong one counts as a
+    wrong try from `client` (the web: the address)."""
     now = _now(now)
     phone = _login_phone(phone)
     _check_password_rules(new_password, phone)      # first: a refusal says nothing about the code
@@ -312,7 +373,7 @@ def set_password_with_code(conn, phone, code, new_password, *, now=None):
             "UPDATE setup_codes SET used_at = ? WHERE id = ? AND used_at IS NULL "
             "AND expires_at > ?", (now.isoformat(), issued["id"], now.isoformat())
         ).rowcount == 1
-        _record_attempt(conn, phone, used, now)
+        _record_attempt(conn, phone, used, now, None if used else client)
         if used:
             current = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
             _check_can_use(current)                 # not blocked or closed meanwhile
@@ -349,12 +410,13 @@ def _end_sessions(conn, user_id, now, keep=None):
                  "AND id IS NOT ?", (now.isoformat(), user_id, keep))
 
 
-def login(conn, phone, password, *, now=None):
+def login(conn, phone, password, *, now=None, client=None):
     """Returns a session token. The same error for an unknown phone, a wrong
-    password and a locked account, so it doesn't tell who is registered."""
+    password and a locked account, so it doesn't tell who is registered.
+    `client` (the web: the address) is who the try counts for; see the lock."""
     now = _now(now)
     phone = _login_phone(phone)
-    if phone and _locked_until(conn, phone, now):
+    if phone and _locked_until(conn, phone, now, client):
         raise LoginFailed(LOGIN_FAILED)
     user = phone and conn.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
     stored = user["password_hash"] if user else None
@@ -364,12 +426,12 @@ def login(conn, phone, password, *, now=None):
     if phone is None:
         raise LoginFailed(LOGIN_FAILED)
     with L._write(conn):        # the password check above is slow: kept out of the lock
-        if _locked_until(conn, phone, now):
+        if _locked_until(conn, phone, now, client):
             raise LoginFailed(LOGIN_FAILED)
         current = user and conn.execute("SELECT * FROM users WHERE id = ?",
                                         (user["id"],)).fetchone()
         ok = ok and current["password_hash"] == stored      # not reset meanwhile
-        _record_attempt(conn, phone, ok, now)
+        _record_attempt(conn, phone, ok, now, client)
         if ok:
             _check_can_use(current)
             if new_hash:
@@ -420,21 +482,21 @@ def logout_everywhere(conn, token, *, now=None):
         _end_sessions(conn, user["id"], now)
 
 
-def change_password(conn, token, old_password, new_password, *, now=None):
+def change_password(conn, token, old_password, new_password, *, now=None, client=None):
     """Change own password. Other sessions end; this one stays. A wrong current
-    password counts towards the same lock as a wrong login."""
+    password counts towards the same lock as a wrong login from `client`."""
     now = _now(now)
     user = authenticate(conn, token, now=now)
     _check_password_rules(new_password, user["phone"])  # first: says nothing about the old one
-    _check_not_locked(conn, user["phone"], now)
+    _check_not_locked(conn, user["phone"], now, client)
     stored = conn.execute("SELECT password_hash FROM users WHERE id = ?",
                           (user["id"],)).fetchone()[0]
     ok = verify_password(old_password or "", stored or _dummy_hash()) and stored is not None
     new_hash = hash_password(new_password) if ok else None     # slow: kept out of the lock
     with L._write(conn):
         authenticate(conn, token, now=now)      # not logged out, blocked or closed meanwhile
-        _check_not_locked(conn, user["phone"], now)
-        _record_attempt(conn, user["phone"], ok, now)
+        _check_not_locked(conn, user["phone"], now, client)
+        _record_attempt(conn, user["phone"], ok, now, client)
         if ok:
             changed = conn.execute(
                 "UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?",

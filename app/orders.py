@@ -7,7 +7,8 @@ paid with the supplier's confirmation reference. Paid and cancelled orders are f
 An order with a supplier can't be cancelled or given to another supplier
 directly: first unassign it (after checking with the supplier that they have
 not paid), then cancel or assign again. A blocked worker's orders are held: no
-supplier is assigned and no payout recorded until they are unblocked.
+supplier is assigned until they are unblocked. A payout the supplier already
+made is still recorded (mark_paid), so the books say what really happened.
 
 A wrong price: set the right one with void_quotes=True, which also makes every
 quote taken before it unusable (by default a quote keeps its price for its 10
@@ -206,8 +207,9 @@ def _get_order(conn, order_id):
 
 
 def _customer_not_blocked(conn, order):
-    """A blocked worker's orders are held: no supplier and no payout until they
-    are unblocked. Unassigning and cancelling (a refund) still work."""
+    """A blocked worker's orders are held: no supplier is assigned until they
+    are unblocked. Unassigning, cancelling (a refund) and recording a payout
+    the supplier already made still work."""
     if conn.execute("SELECT blocked FROM users WHERE id = ?",
                     (order["customer_id"],)).fetchone()["blocked"]:
         raise L.AccountBlocked("the worker is blocked: their orders are held until "
@@ -450,8 +452,9 @@ def assign_supplier(conn, order_id, supplier_id, *, admin_id, rate=None, now=Non
 def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, now=None):
     """Record that the supplier paid the beneficiary. Works once per order.
     `supplier_id`, if given, is the supplier whose confirmation this is: refused
-    (Conflict) if the order is with another supplier by now. Refused while the
-    worker is blocked."""
+    (Conflict) if the order is with another supplier by now. Also while the
+    worker is blocked: the money has left by then, so it is recorded (and the
+    log says the worker was blocked); refusing it would leave the books wrong."""
     ref = (payout_ref or "").strip()
     if not ref:
         raise L.LedgerError("the supplier's confirmation reference is required")
@@ -469,7 +472,6 @@ def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, now
         if supplier_id is not None and o["supplier_id"] != supplier_id:
             raise L.Conflict("this order is with another supplier now: check which "
                              "supplier paid it before marking it paid")
-        _customer_not_blocked(conn, o)
         margin = o["cost"] - o["supplier_cost"]
         txn = L._post(conn, "payout",
                       [(L._system(conn, "SYS_ORDERS"), -o["cost"]),
@@ -479,8 +481,10 @@ def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, now
         conn.execute(
             "UPDATE orders SET status = 'paid', payout_ref = ?, paid_at = ?, "
             "payout_txn_id = ? WHERE id = ?", (ref, _now(now).isoformat(), txn, o["id"]))
+        blocked = conn.execute("SELECT blocked FROM users WHERE id = ?",
+                               (o["customer_id"],)).fetchone()["blocked"]
         L._log(conn, admin_id, "mark_paid", o["id"], receipt=code, payout_ref=ref,
-               supplier_id=o["supplier_id"], margin=margin)
+               supplier_id=o["supplier_id"], margin=margin, customer_blocked=bool(blocked))
         return txn
 
 

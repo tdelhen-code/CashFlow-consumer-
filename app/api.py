@@ -61,12 +61,13 @@ def _reversal_note(conn, txn_id):
 
 # ---------- worker: sending ----------
 
-def _recipient(conn, phone, sender_id):
+def _recipient(conn, phone, sender_id, usable=True):
     """The worker to send to. A blocked or closed one gets the same answer as
-    an unknown phone, so nobody learns from it that a colleague was blocked."""
+    an unknown phone, so nobody learns from it that a colleague was blocked.
+    usable=False also finds a blocked or closed one (the books then decide)."""
     other = L.find_user_by_phone(conn, phone)
-    if (other is None or other["role"] != "customer" or not other["active"]
-            or other["blocked"]):
+    if (other is None or other["role"] != "customer"
+            or (usable and (not other["active"] or other["blocked"]))):
         raise L.UnknownAccount("no worker with that phone number")
     if other["id"] == sender_id:
         raise L.LedgerError("cannot send to yourself")
@@ -82,16 +83,19 @@ def lookup_recipient(conn, token, phone):
 
 def send_money(conn, token, to_phone, amount, *, idempotency_key, note=None):
     """Send LYD to another worker. The app must create one idempotency key per
-    confirm screen, so a double tap or a retry can't send twice."""
+    confirm screen, so a double tap or a retry can't send twice: a retry
+    answers with the first txn_id even if the colleague was blocked since."""
     user = _worker(conn, token)
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise L.LedgerError("idempotency key is required")
-    other = _recipient(conn, to_phone, user["id"])
+    # The books answer a retried key first; a new send to a blocked or closed
+    # colleague is refused there. Any refusal for one is told as unknown.
+    other = _recipient(conn, to_phone, user["id"], usable=False)
     try:
         txn = L.transfer(conn, user["id"], other["id"], L.parse_lyd(amount),
                          idempotency_key=idempotency_key, note=note)
-    except (L.AccountBlocked, L.UnknownAccount):
-        _recipient(conn, to_phone, user["id"])     # blocked or closed just now: as unknown
+    except L.LedgerError:
+        _recipient(conn, to_phone, user["id"])     # blocked or closed: as unknown
         raise
     return {"txn_id": txn, "to": other["name"],
             "balance": _money(L.balance(conn, user["id"]))}

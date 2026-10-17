@@ -58,9 +58,11 @@ Users (in `app/ledger.py`):
 - `block_user` / `unblock_user` freeze a worker while a problem or suspicion is
   checked: no sending, receiving, quotes, orders or cash, but salary and deposits
   still arrive; a blocked admin loses admin rights. Their open orders are held:
-  no supplier can be assigned and no payout recorded until they are unblocked
-  (the admin's order list shows `customer_blocked`). An admin can still unassign
-  (with a reason) and cancel, which refunds to the frozen balance;
+  no supplier can be assigned until they are unblocked (the admin's order list
+  shows `customer_blocked`). An admin can still unassign (with a reason) and
+  cancel, which refunds to the frozen balance. A payout the supplier already
+  made is still recorded with `mark_paid` (the worker's balance doesn't change;
+  the admin log notes the block): never cancel an order the supplier has paid;
 - `deactivate_user` / `reactivate_user` for workers who leave: only at a zero
   balance with no unfinished orders. A reversal that would touch a deactivated
   worker's account is refused (reactivate them first), and the checks report
@@ -77,10 +79,15 @@ worker's statement shows a reversal only as "Order cancelled" or, for an
 Login (`app/auth.py`) and what the web app calls (`app/api.py`):
 - log in with phone (any usual form) and password. A password has at least 10
   characters, is not a much-used one (`1234567890`, `qwertyuiop`, `password123`,
-  ...) and doesn't contain the user's phone number. Passwords are stored with
-  scrypt (N=2^15, r=8, p=1); the cost is kept with each hash, and a hash made
-  with an older cost is redone at the next login. At most 4 hashes run at once,
-  so many logins at the same time can't use up the memory;
+  ...), nor a much-used word with only digits or symbols around it
+  (`Password1!`, `Qwerty123!`), counting (`12345678910`) or a short piece
+  repeated (`123123123123`), and doesn't contain the user's phone number.
+  Passwords are stored with scrypt (N=2^15, r=8, p=3: one of OWASP's minimums,
+  about 0.3 s); the cost is kept with each hash, and a hash made with an older
+  cost is redone at the next login. Until then checking it is padded with the
+  work it falls short of the current cost, so it takes about as long as for an
+  unknown phone. At most 4 hashes run at once, so many logins at the same time
+  can't use up the memory;
 - an admin issues a one-time setup code (`issue_setup_code`, valid 72 hours,
   12 characters shown as `XXXX-XXXX-XXXX`, typed in any case, with or without
   the dashes); the worker uses it to choose their own password
@@ -95,11 +102,20 @@ Login (`app/auth.py`) and what the web app calls (`app/api.py`):
   was already used, or who is logged out unexpectedly, must report it. Later:
   a second admin approves resetting an admin's account;
 - 5 wrong tries in a row (password, setup code, or the current password when
-  changing it) lock that phone number for 15 minutes, registered or not. An
-  unknown phone, a wrong password and a locked account get the same answer and
-  the same slow check, so login can't be used to find out who has an account. A
-  right setup code still works while locked and lifts the lock; an admin can
-  lift it too (`unlock_login`, with a reason, logged);
+  changing it) from one address (IPv6: one /64) lock that phone number for 15
+  minutes from that address, registered or not; the owner can still log in
+  from anywhere else, so a stranger can't lock someone out with a few tries.
+  50 wrong tries within 15 minutes from all addresses together lock it for
+  every address that never gave its right password, so guessing spread over
+  many addresses stays slow while the owner can still log in from where they
+  did before. That is the trade-off: someone with many addresses can still
+  lock a phone for every address its owner hasn't logged in from, and an admin
+  then lifts it. An unknown phone, a wrong password and a locked account get
+  the same answer and the same slow check, so login can't be used to find out
+  who has an account. A right setup code still works while locked and lifts
+  every lock; an admin can lift them too (`unlock_login`, with a reason,
+  logged). `login`, `set_password_with_code` and `change_password` take the
+  address as `client=`;
 - sessions: a week for workers; 8 hours for admins, ending after 30 minutes
   idle. Activity is written at most once a minute, so reading pages doesn't wait
   for other writes; the idle limit can end a session up to a minute early,
@@ -142,9 +158,12 @@ server (waitress, gunicorn) behind HTTPS (nginx, Caddy) that sets
 they all share one login limit. JSON in and out; POSTs must be
 `Content-Type: application/json` (else 415) with a plain `Content-Length` of at
 most 64 KiB (a negative or non-numeric one is a 400, a larger one a 413; none
-means an empty body). The session is an
-HttpOnly, SameSite=Strict cookie (found among any other cookies the browser
-sends), or `Authorization: Bearer <token>`.
+means an empty body). The session is the HttpOnly, Secure, SameSite=Strict
+cookie `__Host-session` (plain `session` with `--insecure-cookies`), found among
+any other cookies the browser sends, or `Authorization: Bearer <token>`. A
+browser takes a `__Host-` cookie only from this very host, so another subdomain
+can't plant one; a request with two different session cookies counts as not
+logged in.
 
 Limits (429 when reached). They are kept in memory, per server process: run
 one process (waitress, or `gunicorn -w 1 --threads 8`), or also limit at the
@@ -152,6 +171,9 @@ proxy; with several processes each one allows as much again:
 - failed login, setup-password and change-password tries: 20 per client
   address per 10 minutes, an IPv6 address counting per /64. Successful tries
   don't count, so an office full of workers behind one address can log in;
+- successful ones (the right password or code, also of a blocked user): 10
+  per account per 10 minutes, from any address, so one account can't log in
+  over and over. Wrong tries don't count here, so nobody else can use them up;
 - each worker's `POST /api/send`, `/api/quote`, `/api/orders` and
   `GET /api/recipient`: 30 a minute.
 
@@ -195,7 +217,9 @@ locked), 500 (nothing internal shown).
 and on the admin money routes `/api/admin/deposit`, `/payroll`, `/withdraw`,
 `/move` and `/suppliers/<id>/pay`: the screen makes one per confirmation, so a
 double click or a retry posts once. The same key again with the same details
-answers with the first `txn_id`; with other details it is a 400. Keys are kept
+answers with the first `txn_id` (on `/api/send` also when the colleague was
+blocked or closed since); with other details it is a 400 (a 404 on `/api/send`
+to a colleague who is blocked or closed by then, like any new send). Keys are kept
 apart per sender, so two workers can't collide. It is optional on
 `/api/admin/reverse` (a transaction can be reversed only once anyway). A
 missing key (where required) or a blank one is a 400.

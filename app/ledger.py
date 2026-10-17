@@ -32,9 +32,9 @@ Users:
   orders.
 - Block = freeze while a problem or doubt is looked into. A blocked worker can't
   send, receive, order or take cash, but salary and admin deposits still come in.
-  Their open currency orders are held too: no supplier can be assigned and no
-  payout recorded until they are unblocked (an admin can still unassign and
-  cancel, which refunds to the frozen balance).
+  Their open currency orders are held too: no supplier can be assigned until
+  they are unblocked (an admin can still unassign and cancel, which refunds to
+  the frozen balance). A payout the supplier already made is still recorded.
   Blocked admins lose admin rights. Both need a reason and are logged.
 """
 import json

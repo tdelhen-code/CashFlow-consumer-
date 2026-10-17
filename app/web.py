@@ -9,14 +9,17 @@ Rules every request follows:
 - Requests and responses are JSON. POST bodies must be sent as
   application/json, which a form on another website can't do, so a logged-in
   browser can't be tricked into sending money (with the SameSite cookie).
-- The session is the `session` cookie (HttpOnly, Secure, SameSite=Strict) or
-  an `Authorization: Bearer <token>` header for a phone app.
+- The session is the `__Host-session` cookie (HttpOnly, Secure,
+  SameSite=Strict; plain `session` with --insecure-cookies) or an
+  `Authorization: Bearer <token>` header for a phone app. Browsers take a
+  `__Host-` cookie only from this very host, so another subdomain can't plant
+  one; two different session cookies in a request count as none.
 - Amounts are typed text in LYD ("12.5"); answers carry dirhams and LYD text.
   Text fields must be JSON strings, at most MAX_TEXT characters; an optional
   field sent blank counts as left out.
 - Failed login, setup-code and change-password tries are limited per internet
-  address, and each worker's money and order requests per minute. Both limits
-  are kept in memory, per server process.
+  address, successful ones per account, and each worker's money and order
+  requests per minute. These limits are kept in memory, per server process.
 - Errors come back as {"error": message, "type": kind} with a fitting status;
   unexpected errors say only "internal error" and are logged on the server.
 """
@@ -42,11 +45,13 @@ from . import orders as O
 
 MAX_BODY_BYTES = 64 * 1024
 LOGIN_TRIES_PER_IP = 20             # failed tries per address (IPv6: per /64)
+LOGINS_PER_ACCOUNT = 10             # successful tries per account, from anywhere
 LOGIN_WINDOW_SECONDS = 10 * 60
 WORKER_REQUESTS_PER_MINUTE = 30     # money, order and recipient requests per worker
 LIMITER_MAX_KEYS = 10_000           # addresses or workers a limiter remembers at once
 DEV_SERVER_THREADS = 8
-COOKIE = "session"
+COOKIE = "session"                  # only with secure_cookies=False (plain http)
+SECURE_COOKIE = "__Host-session"    # can't be set from another subdomain or path
 MAX_ID = 2**63 - 1                  # the largest whole number the database stores
 
 # Longest text accepted per field, in characters; any other text field is at
@@ -175,8 +180,9 @@ def _whole_number(name, value):
 
 
 class Request:
-    def __init__(self, environ, trust_proxy):
+    def __init__(self, environ, trust_proxy, cookie=COOKIE):
         self.environ = environ
+        self.cookie = cookie        # the session cookie's name
         self.method = environ["REQUEST_METHOD"]
         self.path = environ.get("PATH_INFO", "/")
         self.query = {k: v[-1] for k, v in parse_qs(environ.get("QUERY_STRING", "")).items()}
@@ -220,12 +226,15 @@ class Request:
             return header[7:].strip()
         # Read by hand: SimpleCookie stops at the first cookie it can't parse
         # (another app's JSON, a value with a space), losing ours after it.
+        # Two different values mean one was planted (browsers send a cookie
+        # with a longer Path first): neither is taken.
+        values = set()
         for part in self.environ.get("HTTP_COOKIE", "").split(";"):
             name, sep, value = part.partition("=")
             value = value.strip().strip('"')
-            if sep and name.strip() == COOKIE and value:
-                return value
-        return None
+            if sep and name.strip() == self.cookie and value:
+                values.add(value)
+        return values.pop() if len(values) == 1 else None
 
     def get(self, name, required=True):
         """A text field from the JSON body (see _text)."""
@@ -296,36 +305,53 @@ def _limit(req, default=50):
 
 # ---------- login ----------
 
-def _login_try(app, req, attempt):
-    """Run a login, setup-code or change-password try. Only a failed one (wrong,
-    or refused because of earlier wrong ones) counts against the address's
-    LOGIN_TRIES_PER_IP, so a whole office behind one address can log in. It is
-    counted while it runs, so tries sent all at once can't get past the limit."""
-    key = client_key(req.ip)
-    when = app.login_limiter.check(key)
-    failed = False
+def _login_try(app, req, account, attempt):
+    """Run a login, setup-code or change-password try for `account` (a phone),
+    as attempt(client): the address it counts for in the auth lock.
+    - Only a failed one (wrong, or refused because of earlier wrong ones)
+      counts against the address's LOGIN_TRIES_PER_IP, so a whole office
+      behind one address can log in.
+    - Only one with the right password or code counts against the account's
+      LOGINS_PER_ACCOUNT, so one account can't log in over and over (each a
+      slow hash and a new session), and nobody without its password can use
+      them up.
+    Both are counted while the try runs, so tries sent all at once can't get
+    past them."""
+    address, tried, held = client_key(req.ip), None, None
+    wrong = right = False
     try:
-        return attempt()
+        tried = app.login_limiter.check(address)
+        held = app.account_limiter.check(account)
+        result = attempt(address)
+        right = True
+        return result
     except (A.LoginFailed, A.AccountLocked):
-        failed = True
+        wrong = True
+        raise
+    except L.AccountBlocked:            # the right password of a blocked user
+        right = True
         raise
     finally:
-        if not failed:
-            app.login_limiter.forgive(key, when)
+        if tried is not None and not wrong:
+            app.login_limiter.forgive(address, tried)
+        if held is not None and not right:
+            app.account_limiter.forgive(account, held)
 
 
 @route("POST", "/api/login")
 def login(app, conn, req):
     phone, password = req.get("phone"), req.get("password")
-    token = _login_try(app, req, lambda: A.login(conn, phone, password))
+    token = _login_try(app, req, A._login_phone(phone) or phone,
+                       lambda client: A.login(conn, phone, password, client=client))
     return {"ok": True, "token": token}, token
 
 
 @route("POST", "/api/setup-password")
 def setup_password(app, conn, req):
     phone, code, password = req.get("phone"), req.get("code"), req.get("password")
-    token = _login_try(app, req, lambda: A.set_password_with_code(conn, phone, code,
-                                                                  password))
+    token = _login_try(app, req, A._login_phone(phone) or phone,
+                       lambda client: A.set_password_with_code(conn, phone, code, password,
+                                                               client=client))
     return {"ok": True, "token": token}, token
 
 
@@ -344,7 +370,8 @@ def logout_everywhere(app, conn, req):
 @route("POST", "/api/change-password")
 def change_password(app, conn, req):
     old, new = req.get("old_password"), req.get("new_password")
-    _login_try(app, req, lambda: A.change_password(conn, req.token, old, new))
+    _login_try(app, req, A.authenticate(conn, req.token)["phone"],
+               lambda client: A.change_password(conn, req.token, old, new, client=client))
     return {"ok": True}
 
 
@@ -679,12 +706,16 @@ def admin_margin(app, conn, req):
 
 class App:
     def __init__(self, db_path, *, secure_cookies=True, trust_proxy=False,
-                 login_limiter=None, worker_limiter=None):
+                 login_limiter=None, account_limiter=None, worker_limiter=None):
         self.db_path = db_path
         self.secure_cookies = secure_cookies
+        self.cookie_name = SECURE_COOKIE if secure_cookies else COOKIE
         self.trust_proxy = trust_proxy
         self.login_limiter = login_limiter or RateLimiter(LOGIN_TRIES_PER_IP,
                                                           LOGIN_WINDOW_SECONDS)
+        self.account_limiter = account_limiter or RateLimiter(
+            LOGINS_PER_ACCOUNT, LOGIN_WINDOW_SECONDS,
+            message="too many logins to this account; wait a few minutes")
         self.worker_limiter = worker_limiter or RateLimiter(
             WORKER_REQUESTS_PER_MINUTE, 60, message="too many requests; wait a minute")
         self.local = threading.local()
@@ -709,7 +740,7 @@ class App:
     def __call__(self, environ, start_response):
         cookie = None
         try:
-            req = Request(environ, self.trust_proxy)
+            req = Request(environ, self.trust_proxy, self.cookie_name)
             for method, regex, handler in ROUTES:
                 match = regex.match(req.path)
                 if match:
@@ -747,7 +778,7 @@ class App:
             ("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"),
         ]
         if cookie is not None:
-            parts = [f"{COOKIE}={cookie}", "Path=/", "HttpOnly", "SameSite=Strict"]
+            parts = [f"{self.cookie_name}={cookie}", "Path=/", "HttpOnly", "SameSite=Strict"]
             if self.secure_cookies:
                 parts.append("Secure")
             parts.append("Max-Age=0" if cookie == "" else

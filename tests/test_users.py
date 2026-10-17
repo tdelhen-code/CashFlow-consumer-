@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from app import ledger as L
@@ -130,8 +131,6 @@ class UserTests(unittest.TestCase):
         L.block_user(self.db, self.ali, admin_id=self.admin, reason="suspected fraud")
         with self.assertRaises(L.AccountBlocked):
             O.assign_supplier(self.db, placed["id"], supplier, admin_id=self.admin)
-        with self.assertRaises(L.AccountBlocked):
-            O.mark_paid(self.db, assigned["receipt_code"], "EG-1", admin_id=self.admin)
         O.unassign_supplier(self.db, assigned["id"], admin_id=self.admin,
                             reason="worker blocked, supplier has not paid")
         for o in (placed, assigned):
@@ -141,17 +140,41 @@ class UserTests(unittest.TestCase):
             L.transfer(self.db, self.ali, self.sam, lyd("1"))
         self.assertEqual(O.verify(self.db), [])
 
+    def test_a_payout_already_made_is_recorded_while_the_worker_is_blocked(self):
+        # The supplier paid before the block: refusing to record it would leave
+        # the supplier unpaid on the books and push the admin to a cancel that
+        # refunds money already paid out abroad.
+        supplier = O.add_supplier(self.db, "Cairo agent", admin_id=self.admin)
+        O.set_supplier_price(self.db, supplier, "USD", "7.80", admin_id=self.admin)
+        o = self.order("10")
+        O.assign_supplier(self.db, o["id"], supplier, admin_id=self.admin)
+        L.block_user(self.db, self.ali, admin_id=self.admin, reason="doubt")
+        before = L.balance(self.db, self.ali)
+        O.mark_paid(self.db, o["receipt_code"], "EG-1", admin_id=self.admin)
+        self.assertEqual(O.find_by_receipt(self.db, o["receipt_code"])["status"], "paid")
+        self.assertEqual(L.balance(self.db, self.ali), before)      # still frozen, untouched
+        self.assertEqual(O.supplier_balance(self.db, supplier), lyd("78"))
+        logged = self.db.execute(
+            "SELECT details FROM admin_log WHERE action = 'mark_paid'").fetchone()[0]
+        self.assertIs(json.loads(logged)["customer_blocked"], True)
+        with self.assertRaises(L.AccountBlocked):
+            L.transfer(self.db, self.ali, self.sam, lyd("1"))
+        self.assertEqual(O.verify(self.db), [])
+
     def test_unblocking_releases_held_orders(self):
         supplier = O.add_supplier(self.db, "Cairo agent", admin_id=self.admin)
         O.set_supplier_price(self.db, supplier, "USD", "7.80", admin_id=self.admin)
         o = self.order()
-        O.assign_supplier(self.db, o["id"], supplier, admin_id=self.admin)
         L.block_user(self.db, self.ali, admin_id=self.admin, reason="doubt")
         with self.assertRaises(L.AccountBlocked):
-            O.mark_paid(self.db, o["receipt_code"], "EG-1", admin_id=self.admin)
+            O.assign_supplier(self.db, o["id"], supplier, admin_id=self.admin)
         L.unblock_user(self.db, self.ali, admin_id=self.admin, reason="cleared")
+        O.assign_supplier(self.db, o["id"], supplier, admin_id=self.admin)
         O.mark_paid(self.db, o["receipt_code"], "EG-1", admin_id=self.admin)
         self.assertEqual(O.find_by_receipt(self.db, o["receipt_code"])["status"], "paid")
+        logged = self.db.execute(
+            "SELECT details FROM admin_log WHERE action = 'mark_paid'").fetchone()[0]
+        self.assertIs(json.loads(logged)["customer_blocked"], False)
         self.assertEqual(O.verify(self.db), [])
 
     def test_salary_and_deposits_still_reach_a_blocked_worker(self):
