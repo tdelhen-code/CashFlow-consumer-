@@ -64,6 +64,13 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(L.PermissionDenied):
             L.create_user(self.db, "customer", "Walk-in", "0944444444")
 
+    def test_a_till_is_added_once(self):
+        with self.assertRaises(L.Conflict):
+            L.add_till(self.db, " Main", admin_id=self.admin)
+        with self.assertRaises(L.LedgerError):
+            L.add_till(self.db, 7, admin_id=self.admin)
+        self.assertEqual(L.add_till(self.db, "airport", admin_id=self.admin), "TILL_AIRPORT")
+
     def test_workers_cannot_do_admin_actions(self):
         self.fund(self.ali, "100")
         with self.assertRaises(L.PermissionDenied):
@@ -96,6 +103,28 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(L.balance(self.db, self.ali), lyd("800"))
         self.assertEqual(L.balance(self.db, self.sam), lyd("950.5"))
         self.assertEqual(L.holding_amount(self.db, "BANK"), lyd("1750.5"))
+        self.assertHealthy()
+
+    def test_a_payroll_batch_reference_is_posted_once(self):
+        boss = L.create_user(self.db, "admin", "Boss", "0930000000", admin_id=self.admin)
+        first = L.payroll_credit(self.db, [(self.ali, lyd("800"))], admin_id=self.admin,
+                                 batch_ref="OCT-2026", idempotency_key="p1")
+        self.assertEqual(L.payroll_credit(self.db, [(self.ali, lyd("800"))],
+                                          admin_id=self.admin, batch_ref="OCT-2026",
+                                          idempotency_key="p1"), first)   # a retry
+        for admin, ref, key in ((self.admin, "OCT-2026", None), (boss, " oct-2026 ", "p1")):
+            with self.assertRaises(L.Conflict):
+                L.payroll_credit(self.db, [(self.ali, lyd("800"))], admin_id=admin,
+                                 batch_ref=ref, idempotency_key=key)
+        self.assertEqual(L.balance(self.db, self.ali), lyd("800"))
+        L.reverse(self.db, first, admin_id=self.admin, reason="wrong amount")
+        L.payroll_credit(self.db, [(self.ali, lyd("850"))], admin_id=self.admin,
+                         batch_ref="OCT-2026")
+        self.assertEqual(L.balance(self.db, self.ali), lyd("850"))
+        for ref in (" ", None):
+            with self.assertRaises(L.LedgerError):
+                L.payroll_credit(self.db, [(self.ali, lyd("1"))], admin_id=self.admin,
+                                 batch_ref=ref)
         self.assertHealthy()
 
     def test_payroll_with_unknown_worker_credits_nobody(self):
@@ -168,6 +197,21 @@ class LedgerTests(unittest.TestCase):
             L.deposit(self.db, self.ali, lyd("60"), admin_id=self.admin,
                       into="BANK", idempotency_key="dep-1")
         self.assertEqual(L.balance(self.db, self.ali), lyd("50"))
+
+    def test_blank_or_odd_idempotency_keys_are_refused(self):
+        for key in ("", "   ", False, 0, 5, ["k"], "k" * 201):
+            with self.assertRaises(L.LedgerError, msg=repr(key)):
+                L.deposit(self.db, self.ali, lyd("50"), admin_id=self.admin,
+                          into="BANK", idempotency_key=key)
+        self.assertEqual(L.balance(self.db, self.ali), 0)
+        a = L.deposit(self.db, self.ali, lyd("50"), admin_id=self.admin,
+                      into="BANK", idempotency_key=" dep-1 ")
+        b = L.deposit(self.db, self.ali, lyd("50"), admin_id=self.admin,
+                      into="BANK", idempotency_key="dep-1")
+        self.assertEqual(a, b)
+        L.deposit(self.db, self.ali, lyd("50"), admin_id=self.admin,
+                  into="BANK", idempotency_key="k" * 200)
+        self.assertEqual(L.balance(self.db, self.ali), lyd("100"))
 
     # --- cash out ---
     def test_withdraw_cash_with_commission(self):

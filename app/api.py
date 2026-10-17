@@ -69,7 +69,7 @@ def send_money(conn, token, to_phone, amount, *, idempotency_key, note=None):
     """Send LYD to another worker. The app must create one idempotency key per
     confirm screen, so a double tap or a retry can't send twice."""
     user = _worker(conn, token)
-    if not (idempotency_key or "").strip():
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise L.LedgerError("idempotency key is required")
     other = _recipient(conn, to_phone, user["id"])
     txn = L.transfer(conn, user["id"], other["id"], L.parse_lyd(amount),

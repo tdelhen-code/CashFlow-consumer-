@@ -144,6 +144,23 @@ class UserTests(unittest.TestCase):
         with self.assertRaises(L.LedgerError):          # refund is back on the balance
             L.deactivate_user(self.db, self.ali, admin_id=self.admin, reason="left")
 
+    def test_reversal_cannot_put_money_on_a_deactivated_account(self):
+        out = L.withdraw_cash(self.db, self.ali, lyd("100"), 0, admin_id=self.admin,
+                              from_till=self.till)
+        L.deactivate_user(self.db, self.ali, admin_id=self.admin, reason="left")
+        with self.assertRaises(L.LedgerError):
+            L.reverse(self.db, out, admin_id=self.admin, reason="typed wrong")
+        self.assertEqual(L.balance(self.db, self.ali), 0)
+        self.assertEqual(O.verify(self.db), [])
+        L.reactivate_user(self.db, self.ali, admin_id=self.admin, reason="pay back")
+        L.reverse(self.db, out, admin_id=self.admin, reason="typed wrong")
+        self.assertEqual(L.balance(self.db, self.ali), lyd("100"))
+
+    def test_verify_flags_money_on_a_deactivated_account(self):
+        self.db.execute("UPDATE users SET active = 0 WHERE id = ?", (self.ali,))
+        self.assertEqual(O.verify(self.db),
+                         [f"account CUS_{self.ali} of a deactivated user holds 100000"])
+
     def test_reactivate_and_no_self_deactivation(self):
         L.deactivate_user(self.db, self.sam, admin_id=self.admin, reason="left")
         L.reactivate_user(self.db, self.sam, admin_id=self.admin, reason="came back")

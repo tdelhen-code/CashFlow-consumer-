@@ -44,7 +44,7 @@ ERROR_STATUS = [            # first match wins, so subclasses come first
     (A.LoginFailed, 401), (A.NotLoggedIn, 401), (A.AccountLocked, 429),
     (L.PermissionDenied, 403), (L.AccountBlocked, 403), (L.UnknownAccount, 404),
     (O.QuoteExpired, 409), (L.InsufficientFunds, 409), (L.NotEnoughCash, 409),
-    (L.LedgerError, 400),
+    (L.Conflict, 409), (L.LedgerError, 400),
 ]
 
 
@@ -154,6 +154,20 @@ def _money(dirhams):
     return {"dirhams": dirhams, "lyd": L.format_lyd(dirhams)}
 
 
+def _idem_key(req, required=True):
+    """The request's idempotency_key. Admin money routes and /api/send require
+    one, so a double click or a retry can't post twice. A key that is sent must
+    be real text: a blank one is refused, never taken as "no key"."""
+    value = req.body.get("idempotency_key")
+    if value is None:
+        if required:
+            raise HttpError(400, "'idempotency_key' is required")
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise HttpError(400, "'idempotency_key' must be non-empty text")
+    return value
+
+
 def _limit(req, default=50):
     try:
         return max(1, min(int(req.query.get("limit", default)), 200))
@@ -216,7 +230,7 @@ def recipient(app, conn, req):
 @route("POST", "/api/send")
 def send(app, conn, req):
     return api.send_money(conn, req.token, req.get("to_phone"), req.get("amount"),
-                          idempotency_key=req.get("idempotency_key"),
+                          idempotency_key=_idem_key(req),
                           note=req.get("note", required=False))
 
 
@@ -309,7 +323,7 @@ def admin_user_statement(app, conn, req):
 def admin_deposit(app, conn, req):
     return {"txn_id": L.deposit(conn, req.number("user_id"), L.parse_lyd(req.get("amount")),
                                 admin_id=_admin(conn, req), into=req.get("into"),
-                                idempotency_key=req.get("idempotency_key", required=False),
+                                idempotency_key=_idem_key(req),
                                 note=req.get("note", required=False))}
 
 
@@ -325,7 +339,7 @@ def admin_payroll(app, conn, req):
     return {"txn_id": L.payroll_credit(
         conn, parsed, admin_id=_admin(conn, req), batch_ref=req.get("batch_ref"),
         into=req.get("into", required=False) or "BANK",
-        idempotency_key=req.get("idempotency_key", required=False),
+        idempotency_key=_idem_key(req),
         note=req.get("note", required=False))}
 
 
@@ -336,7 +350,7 @@ def admin_withdraw(app, conn, req):
         conn, req.number("user_id"), L.parse_lyd(req.get("amount")),
         L.parse_lyd(fee) if fee not in (None, "") else 0, admin_id=_admin(conn, req),
         from_till=req.get("from_till"),
-        idempotency_key=req.get("idempotency_key", required=False),
+        idempotency_key=_idem_key(req),
         note=req.get("note", required=False))}
 
 
@@ -345,14 +359,14 @@ def admin_move(app, conn, req):
     return {"txn_id": L.move_money(conn, req.get("from"), req.get("to"),
                                    L.parse_lyd(req.get("amount")), admin_id=_admin(conn, req),
                                    note=req.get("note", required=False),
-                                   idempotency_key=req.get("idempotency_key", required=False))}
+                                   idempotency_key=_idem_key(req))}
 
 
 @route("POST", "/api/admin/reverse")
 def admin_reverse(app, conn, req):
     return {"txn_id": L.reverse(conn, req.number("txn_id"), admin_id=_admin(conn, req),
                                 reason=req.get("reason"),
-                                idempotency_key=req.get("idempotency_key", required=False))}
+                                idempotency_key=_idem_key(req, required=False))}
 
 
 @route("POST", "/api/admin/tills")
@@ -387,9 +401,18 @@ def admin_add_currency(app, conn, req):
     return {"code": O.add_currency(conn, req.get("code"), admin_id=_admin(conn, req))}
 
 
+@route("POST", "/api/admin/currencies/active")
+def admin_currency_active(app, conn, req):
+    O.set_currency_active(conn, req.get("code"), req.get("active"),
+                          admin_id=_admin(conn, req), reason=req.get("reason"))
+    return {"ok": True}
+
+
 @route("POST", "/api/admin/prices")
 def admin_set_price(app, conn, req):
-    O.set_price(conn, req.get("currency"), req.get("rate"), admin_id=_admin(conn, req))
+    void = req.get("void_quotes", required=False)
+    O.set_price(conn, req.get("currency"), req.get("rate"), admin_id=_admin(conn, req),
+                void_quotes=False if void is None else void)
     return {"ok": True}
 
 
@@ -419,7 +442,7 @@ def admin_pay_supplier(app, conn, req):
     return {"txn_id": O.pay_supplier(
         conn, req.int("id"), L.parse_lyd(req.get("amount")), admin_id=_admin(conn, req),
         from_code=req.get("from"), reference=req.get("reference"),
-        idempotency_key=req.get("idempotency_key", required=False),
+        idempotency_key=_idem_key(req),
         note=req.get("note", required=False))}
 
 

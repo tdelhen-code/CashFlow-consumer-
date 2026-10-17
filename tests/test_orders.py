@@ -189,10 +189,68 @@ class OrderTests(unittest.TestCase):
 
     def test_no_order_on_a_currency_switched_off_after_the_quote(self):
         q = O.get_quote(self.db, self.ali, "USD", "10", now=T0)
-        self.db.execute("UPDATE currencies SET active = 0 WHERE code = 'USD'")
+        O.set_currency_active(self.db, "usd", False, admin_id=self.admin,
+                              reason="wrong price typed")
         with self.assertRaises(L.LedgerError):
             O.place_order(self.db, self.ali, q["quote_id"], "Ahmed", "A1", now=T0)
+        with self.assertRaises(L.LedgerError):
+            O.get_quote(self.db, self.ali, "USD", "10", now=T0)
         self.assertEqual(L.balance(self.db, self.ali), lyd("1000"))
+        O.set_price(self.db, "USD", "7.90", admin_id=self.admin, now=T0)   # while off
+        O.set_currency_active(self.db, "USD", True, admin_id=self.admin, reason="fixed")
+        self.assertEqual(O.get_quote(self.db, self.ali, "USD", "10", now=T0)["rate"], "7.90")
+        log = [(r["action"], r["target"], r["details"]) for r in self.db.execute(
+            "SELECT action, target, details FROM admin_log "
+            "WHERE action = 'set_currency_active' ORDER BY id")]
+        self.assertEqual(log, [
+            ("set_currency_active", "USD", '{"active": false, "reason": "wrong price typed"}'),
+            ("set_currency_active", "USD", '{"active": true, "reason": "fixed"}')])
+
+    def test_switching_a_currency_needs_an_admin_a_reason_and_a_change(self):
+        with self.assertRaises(L.PermissionDenied):
+            O.set_currency_active(self.db, "USD", False, admin_id=self.ali, reason="x")
+        with self.assertRaises(L.LedgerError):
+            O.set_currency_active(self.db, "USD", False, admin_id=self.admin, reason=" ")
+        with self.assertRaises(L.LedgerError):
+            O.set_currency_active(self.db, "USD", True, admin_id=self.admin, reason="x")
+        with self.assertRaises(L.LedgerError):
+            O.set_currency_active(self.db, "GBP", False, admin_id=self.admin, reason="x")
+        with self.assertRaises(L.LedgerError):
+            O.set_currency_active(self.db, "USD", 0, admin_id=self.admin, reason="x")
+
+    def test_a_corrected_price_can_void_open_quotes(self):
+        before = O.get_quote(self.db, self.ali, "USD", "100", now=T0)
+        O.set_price(self.db, "USD", "0.785", admin_id=self.admin, now=T0)    # typo
+        typo = O.get_quote(self.db, self.ali, "USD", "100", now=T0)
+        O.set_price(self.db, "USD", "7.85", admin_id=self.admin, now=T0, void_quotes=True)
+        O.set_price(self.db, "USD", "7.86", admin_id=self.admin, now=T0)
+        for q in (before, typo):
+            with self.assertRaises(O.QuoteExpired):
+                O.place_order(self.db, self.ali, q["quote_id"], "Ahmed", "A1",
+                              now=T0 + timedelta(minutes=1))
+        self.assertEqual(L.balance(self.db, self.ali), lyd("1000"))
+        o = self.order("100")
+        self.assertEqual(o["cost"], lyd("786"))
+        with self.assertRaises(L.LedgerError):
+            O.set_price(self.db, "USD", "7.85", admin_id=self.admin, void_quotes="yes")
+        self.assertHealthy()
+
+    # --- setup checks ---
+    def test_currency_codes_are_three_letters_and_added_once(self):
+        self.assertEqual(O.add_currency(self.db, " gbp ", admin_id=self.admin), "GBP")
+        for bad in ("EURO", "us", "U5D", "", None, 123, "us\u0131"):   # \u0131 upper() is I
+            with self.assertRaises(L.LedgerError, msg=repr(bad)) as caught:
+                O.add_currency(self.db, bad, admin_id=self.admin)
+            self.assertNotIsInstance(caught.exception, L.Conflict)
+        with self.assertRaises(L.Conflict):
+            O.add_currency(self.db, "usd", admin_id=self.admin)
+
+    def test_supplier_names_are_unique(self):
+        with self.assertRaises(L.Conflict):
+            O.add_supplier(self.db, " cairo AGENT", "EG", admin_id=self.admin)
+        with self.assertRaises(L.LedgerError):
+            O.add_supplier(self.db, "  ", admin_id=self.admin)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM suppliers").fetchone()[0], 1)
 
 
 if __name__ == "__main__":

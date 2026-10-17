@@ -167,6 +167,17 @@ class SettlementTests(unittest.TestCase):
                            from_code="BANK", reference=" ")
         self.assertHealthy()
 
+    def test_supplier_payment_key_reused_for_another_reference_is_refused(self):
+        a = O.pay_supplier(self.db, self.cairo, lyd("10"), admin_id=self.admin,
+                           from_code="BANK", reference="WIRE-1", idempotency_key="pay-1")
+        with self.assertRaises(L.LedgerError):
+            O.pay_supplier(self.db, self.cairo, lyd("10"), admin_id=self.admin,
+                           from_code="BANK", reference="WIRE-2", idempotency_key="pay-1")
+        self.assertEqual(O.pay_supplier(self.db, self.cairo, lyd("10"), admin_id=self.admin,
+                                        from_code="BANK", reference=" WIRE-1 ",
+                                        idempotency_key="pay-1"), a)
+        self.assertEqual(O.supplier_balance(self.db, self.cairo), -lyd("10"))
+
     # --- reporting and checks ---
     def test_margin_report_groups_and_filters_by_paid_time(self):
         self.pay_out(self.order("100"), at=T0)

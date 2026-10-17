@@ -21,6 +21,8 @@ Other rules:
 - Writes can carry an idempotency key, so a double tap or retry can't post twice.
   Keys are scoped to the person sending them and the kind of action, and a key
   reused with different details is refused instead of answered with the old result.
+  A key is non-empty text (spaces around it are dropped), at most 200 characters.
+- Each payroll batch reference can be posted once (again only after a reversal).
 - Any single amount is at most MAX_DIRHAMS (1 billion LYD).
 
 Users:
@@ -45,6 +47,7 @@ SYSTEM_ACCOUNTS = ("SYS_ORDERS", "SYS_FEES", "SYS_MARGIN", "SYS_CAPITAL")
 ROLES = ("customer", "admin")
 LANGUAGES = ("ar", "en", "fr")
 MOBILE_PREFIXES = ("91", "92", "93", "94", "95")   # Libyan mobile networks
+MAX_IDEMPOTENCY_KEY = 200
 
 
 class LedgerError(Exception):
@@ -73,6 +76,11 @@ class PermissionDenied(LedgerError):
 
 class AccountBlocked(LedgerError):
     """The worker is blocked by an admin; their money is frozen."""
+
+
+class Conflict(LedgerError):
+    """Clashes with something already recorded: an existing till, currency or
+    supplier, or a payroll batch that was already posted."""
 
 
 SCHEMA = """
@@ -283,6 +291,13 @@ def _idempotent(conn, key, actor, kind, **details):
     same key can't make one of them think its money moved when it didn't."""
     if key is None:
         return NO_IDEM
+    # A blank key must not count as a key: every blank-key request would then
+    # look like a repeat of the first one and be silently dropped.
+    if not isinstance(key, str) or not key.strip():
+        raise LedgerError("idempotency key must be non-empty text")
+    key = key.strip()
+    if len(key) > MAX_IDEMPOTENCY_KEY:
+        raise LedgerError(f"idempotency key: at most {MAX_IDEMPOTENCY_KEY} characters")
     scoped = f"{actor}:{kind}:{key}"
     request = json.dumps(details, sort_keys=True, default=str)
     row = conn.execute("SELECT id, request FROM transactions WHERE idempotency_key = ?",
@@ -505,12 +520,14 @@ def reactivate_user(conn, user_id, *, admin_id, reason):
 
 def add_till(conn, name, *, admin_id):
     """A cash till at one of the shops. Returns its code, e.g. TILL_MAIN."""
-    name = name.strip().upper()
+    name = name.strip().upper() if isinstance(name, str) else ""
     if not re.fullmatch(r"[A-Z0-9_]{1,30}", name):
         raise LedgerError("till name: letters, digits and _ only")
     code = f"TILL_{name}"
     with _write(conn):
         _require_admin(conn, admin_id)
+        if conn.execute("SELECT 1 FROM accounts WHERE code = ?", (code,)).fetchone():
+            raise Conflict(f"{code} already exists")
         conn.execute("INSERT INTO accounts(kind, code) VALUES ('holding', ?)", (code,))
         _log(conn, admin_id, "add_till", code)
     return code
@@ -537,17 +554,30 @@ def deposit(conn, user_id, amount, *, admin_id, into, idempotency_key=None, note
 
 def payroll_credit(conn, items, *, admin_id, batch_ref, into="BANK",
                    idempotency_key=None, note=None):
-    """Company sent one payment; credit each worker. items = [(user_id, amount)]."""
+    """Company sent one payment; credit each worker. items = [(user_id, amount)].
+    batch_ref (the company's payment reference) can be posted only once, whoever
+    posts it, so a retried or re-entered batch can't pay everyone twice. After a
+    reversal of that batch it can be posted again."""
     if not items:
         raise LedgerError("payroll batch is empty")
     for _, amount in items:
         _check_amount(amount)
+    if not isinstance(batch_ref, str) or not batch_ref.strip():
+        raise LedgerError("a payroll batch reference is required")
+    batch_ref = batch_ref.strip()
     with _write(conn):
         _require_admin(conn, admin_id)
         idem = _idempotent(conn, idempotency_key, admin_id, "payroll", items=list(items),
                            batch_ref=batch_ref, into=into)
         if idem.existing:
             return idem.existing
+        posted = conn.execute(
+            "SELECT t.id FROM transactions t WHERE t.kind = 'payroll' "
+            "AND t.reference = ? COLLATE NOCASE AND NOT EXISTS (SELECT 1 FROM "
+            "transactions r WHERE r.reverses_txn_id = t.id)", (batch_ref,)).fetchone()
+        if posted:
+            raise Conflict(f"payroll batch {batch_ref} was already posted "
+                           f"(transaction {posted['id']})")
         total = sum(amount for _, amount in items)
         entries = [(_holding(conn, into), -total)]
         entries += [(_customer_account(conn, uid), amount) for uid, amount in items]
@@ -677,6 +707,12 @@ def _reverse(conn, txn_id, admin_id, reason, idem=NO_IDEM):
     if conn.execute("SELECT 1 FROM transactions WHERE reverses_txn_id = ?",
                     (txn_id,)).fetchone():
         raise LedgerError("transaction already reversed")
+    closed = conn.execute(
+        "SELECT u.id FROM entries e JOIN accounts a ON a.id = e.account_id "
+        "JOIN users u ON u.id = a.user_id WHERE e.txn_id = ? AND u.active = 0",
+        (txn_id,)).fetchone()
+    if closed:   # would leave money on (or take it from) a closed account
+        raise LedgerError(f"user {closed['id']} is deactivated; reactivate them first")
     rows = conn.execute(
         "SELECT account_id, amount FROM entries WHERE txn_id = ?", (txn_id,)).fetchall()
     entries = [(r["account_id"], -r["amount"]) for r in rows]
@@ -686,7 +722,8 @@ def _reverse(conn, txn_id, admin_id, reason, idem=NO_IDEM):
 
 def reverse(conn, txn_id, *, admin_id, reason, idempotency_key=None):
     """Post the exact opposite of a transaction. Each can be reversed once.
-    Currency orders are cancelled with orders.cancel_order instead."""
+    Currency orders are cancelled with orders.cancel_order instead. Refused while
+    a worker it touches is deactivated, so a closed account stays at zero."""
     with _write(conn):
         _require_admin(conn, admin_id)
         idem = _idempotent(conn, idempotency_key, admin_id, "reversal", txn_id=txn_id)
@@ -779,6 +816,11 @@ def verify_ledger(conn):
             "JOIN accounts a ON a.id = e.account_id WHERE a.kind = 'holding' "
             "GROUP BY a.id HAVING SUM(e.amount) > 0"):
         problems.append(f"{r['code']} shows less than zero money ({-r['s']})")
+    for r in conn.execute(
+            "SELECT a.code, SUM(e.amount) AS s FROM entries e "
+            "JOIN accounts a ON a.id = e.account_id JOIN users u ON u.id = a.user_id "
+            "WHERE u.active = 0 GROUP BY a.id HAVING SUM(e.amount) <> 0"):
+        problems.append(f"account {r['code']} of a deactivated user holds {r['s']}")
     return problems
 
 

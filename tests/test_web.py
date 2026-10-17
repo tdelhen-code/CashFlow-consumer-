@@ -165,7 +165,8 @@ class WebTests(unittest.TestCase):
             (self.admin.post("/api/admin/deposit", {"user_id": "abc", "amount": "1",
                                                     "into": "BANK"}), 400),
             (self.admin.post("/api/admin/withdraw", {"user_id": ali_id, "amount": "1",
-                                                     "from_till": "TILL_NOPE"}), 404),
+                                                     "from_till": "TILL_NOPE",
+                                                     "idempotency_key": "w1"}), 404),
         ]
         for (status, body), expected in cases:
             self.assertEqual(status, expected, body)
@@ -177,6 +178,102 @@ class WebTests(unittest.TestCase):
         status, body = ali.post("/api/send", {"to_phone": "0922222222", "amount": "1",
                                               "idempotency_key": "k"})
         self.assertEqual((status, body["type"]), (409, "InsufficientFunds"))
+
+    # --- admin money: idempotency keys and payroll batches ---
+    def test_admin_money_routes_need_a_real_idempotency_key(self):
+        ali_id, _ = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        self.assertEqual(self.admin.post("/api/admin/tills", {"name": "main"})[0], 200)
+        self.assertEqual(self.admin.post("/api/admin/suppliers", {"name": "Cairo"})[0], 200)
+        routes = [
+            ("/api/admin/deposit", {"user_id": ali_id, "amount": "100", "into": "TILL_MAIN"}),
+            ("/api/admin/payroll", {"items": [{"user_id": ali_id, "amount": "500"}],
+                                    "batch_ref": "OCT-2026"}),
+            ("/api/admin/withdraw", {"user_id": ali_id, "amount": "50",
+                                     "from_till": "TILL_MAIN"}),
+            ("/api/admin/move", {"from": "BANK", "to": "TILL_MAIN", "amount": "20"}),
+            ("/api/admin/suppliers/1/pay", {"amount": "10", "from": "BANK",
+                                            "reference": "W-1"}),
+        ]
+        txns = {}
+        for path, body in routes:
+            for key in (None, "", "  ", 5, False):
+                sent = body if key is None else dict(body, idempotency_key=key)
+                status, answer = self.admin.post(path, sent)
+                self.assertEqual(status, 400, (path, key, answer))
+            first = self.admin.post(path, dict(body, idempotency_key=f"k-{path}"))
+            again = self.admin.post(path, dict(body, idempotency_key=f"k-{path}"))
+            self.assertEqual(first[0], 200, first)
+            self.assertEqual(first, again)
+            txns[path] = first[1]["txn_id"]
+        status, statement = self.admin.get(f"/api/admin/users/{ali_id}/statement")
+        self.assertEqual(statement["balance"]["lyd"], "550.000")
+        self.assertEqual(len(set(txns.values())), 5)
+
+        move = {"txn_id": txns["/api/admin/move"], "reason": "not moved"}
+        self.assertEqual(self.admin.post("/api/admin/reverse",
+                                         dict(move, idempotency_key=" "))[0], 400)
+        self.assertEqual(self.admin.post("/api/admin/reverse", move)[0], 200)
+        self.assertEqual(self.admin.get("/api/admin/health")[1]["problems"], [])
+
+    def test_a_payroll_batch_is_posted_once_whoever_sends_it(self):
+        ali_id, _ = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        status, made = self.admin.post("/api/admin/users", {
+            "name": "Boss", "phone": "0930000000", "role": "admin"})
+        boss = Client(self.app, ip="10.0.2.1")
+        status, _ = boss.post("/api/setup-password", {
+            "phone": "0930000000", "code": made["setup_code"], "password": "Boss-Pass-2026"})
+        self.assertEqual(status, 200)
+        batch = {"items": [{"user_id": ali_id, "amount": "950"}], "batch_ref": "OCT-2026"}
+        self.assertEqual(self.admin.post("/api/admin/payroll",
+                                         dict(batch, idempotency_key="p1"))[0], 200)
+        for client, key in ((boss, "p1"), (self.admin, "p2")):
+            status, body = client.post("/api/admin/payroll", dict(batch, idempotency_key=key))
+            self.assertEqual((status, body["type"]), (409, "Conflict"))
+        status, statement = self.admin.get(f"/api/admin/users/{ali_id}/statement")
+        self.assertEqual(statement["balance"]["lyd"], "950.000")
+
+    # --- admin setup: currencies, tills, suppliers ---
+    def test_duplicate_or_bad_setup_is_refused_clearly(self):
+        cases = [
+            (("/api/admin/currencies", {"code": "usd"}), 200),
+            (("/api/admin/currencies", {"code": "USD"}), 409),
+            (("/api/admin/currencies", {"code": "EURO"}), 400),
+            (("/api/admin/currencies", {"code": 123}), 400),
+            (("/api/admin/tills", {"name": "MAIN"}), 200),
+            (("/api/admin/tills", {"name": "main"}), 409),
+            (("/api/admin/suppliers", {"name": "Cairo agent"}), 200),
+            (("/api/admin/suppliers", {"name": "cairo agent "}), 409),
+        ]
+        for (path, body), expected in cases:
+            status, answer = self.admin.post(path, body)
+            self.assertEqual(status, expected, (path, body, answer))
+
+    def test_admin_can_void_quotes_and_switch_a_currency_off(self):
+        _, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        self.admin.post("/api/admin/currencies", {"code": "USD"})
+        self.admin.post("/api/admin/prices", {"currency": "USD", "rate": "0.785"})
+        status, quote = ali.post("/api/quote", {"currency": "USD", "amount": "10"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.admin.post("/api/admin/prices", {
+            "currency": "USD", "rate": "7.85", "void_quotes": "yes"})[0], 400)
+        self.assertEqual(self.admin.post("/api/admin/prices", {
+            "currency": "USD", "rate": "7.85", "void_quotes": True})[0], 200)
+        status, body = ali.post("/api/orders", {"quote_id": quote["quote_id"],
+                                                "beneficiary_name": "Ahmed",
+                                                "beneficiary_id": "A1"})
+        self.assertEqual((status, body["type"]), (409, "QuoteExpired"))
+
+        switch = {"code": "usd", "active": False, "reason": "checking the rate"}
+        for bad in ({"active": "no"}, {"reason": ""}, {"code": "GBP"}):
+            self.assertEqual(self.admin.post("/api/admin/currencies/active",
+                                             dict(switch, **bad))[0], 400)
+        self.assertEqual(ali.post("/api/admin/currencies/active", switch)[0], 403)
+        self.assertEqual(self.admin.post("/api/admin/currencies/active", switch)[0], 200)
+        self.assertEqual(ali.get("/api/prices")[1], {"prices": []})
+        self.assertEqual(ali.post("/api/quote", {"currency": "USD", "amount": "10"})[0], 400)
+        self.assertEqual(self.admin.post("/api/admin/currencies/active",
+                                         dict(switch, active=True))[0], 200)
+        self.assertEqual(ali.post("/api/quote", {"currency": "USD", "amount": "10"})[0], 200)
 
     # --- request hygiene ---
     def test_posts_must_be_json(self):

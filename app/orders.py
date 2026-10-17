@@ -7,12 +7,18 @@ paid with the supplier's confirmation reference. Paid and cancelled orders are f
 An order with a supplier can't be cancelled directly: first unassign it (after
 checking with the supplier that they have not paid), then cancel.
 
+A wrong price: set the right one with void_quotes=True, which also makes every
+quote taken before it unusable (by default a quote keeps its price for its 10
+minutes). set_currency_active switches a currency off at once: no quotes or
+orders for it, even on quotes already issued, until it is switched back on.
+
 Money: placing an order moves its cost from the worker to SYS_ORDERS. Assigning a
 supplier locks the supplier's agreed rate onto the order (supplier_cost). Marking
 it paid moves the cost out of SYS_ORDERS: supplier_cost to the supplier's account
 (what we now owe them) and the rest to SYS_MARGIN (negative if we lost on it).
 Paying the supplier from the bank or a till is recorded with pay_supplier.
 """
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, DecimalException, ROUND_HALF_UP, localcontext
@@ -40,7 +46,8 @@ CREATE TABLE IF NOT EXISTS prices (
   currency TEXT NOT NULL REFERENCES currencies(code),
   rate TEXT NOT NULL,                 -- LYD for 1 unit, exact decimal text
   set_by INTEGER NOT NULL REFERENCES users(id),
-  set_at TEXT NOT NULL
+  set_at TEXT NOT NULL,
+  voids_quotes INTEGER NOT NULL DEFAULT 0   -- quotes from earlier prices can't be used
 );
 
 CREATE TABLE IF NOT EXISTS suppliers (
@@ -65,6 +72,7 @@ CREATE TABLE IF NOT EXISTS quotes (
   currency TEXT NOT NULL,
   foreign_amount TEXT NOT NULL,
   rate TEXT NOT NULL,
+  price_id INTEGER NOT NULL REFERENCES prices(id),
   cost INTEGER NOT NULL CHECK (cost > 0),
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
@@ -189,44 +197,89 @@ def _active_currency(conn, code):
         raise L.LedgerError(f"{code} is not available")
 
 
+def _currency_code(code):
+    """'usd ' -> 'USD'. Exactly 3 letters A-Z (checked before upper-casing, which
+    turns some other letters into A-Z)."""
+    code = code.strip() if isinstance(code, str) else ""
+    if not re.fullmatch(r"[A-Za-z]{3}", code):
+        raise L.LedgerError("currency code must be 3 letters, e.g. USD")
+    return code.upper()
+
+
 # ---------- setup by admin ----------
 
 def add_currency(conn, code, *, admin_id):
-    code = code.strip().upper()
+    code = _currency_code(code)
     with L._write(conn):
         L._require_admin(conn, admin_id)
+        if conn.execute("SELECT 1 FROM currencies WHERE code = ?", (code,)).fetchone():
+            raise L.Conflict(f"{code} already exists")
         conn.execute("INSERT INTO currencies(code) VALUES (?)", (code,))
         L._log(conn, admin_id, "add_currency", code)
     return code
 
 
-def set_price(conn, currency, rate, *, admin_id, now=None):
-    """rate = LYD for 1 unit of the currency, up to 6 decimals, e.g. '7.85'.
-    Every price ever set is kept."""
-    r = _decimal(rate, 6, "rate")
+def set_currency_active(conn, code, active, *, admin_id, reason):
+    """Switch a currency off (active=False) or back on. While it is off workers
+    can't see its price, get quotes or place orders, not even on quotes taken
+    before. Orders already placed are not touched. The reason is logged."""
+    code = _currency_code(code)
+    if not isinstance(active, bool):
+        raise L.LedgerError("active must be true or false")
+    reason = L._reason(reason)
     with L._write(conn):
         L._require_admin(conn, admin_id)
-        _active_currency(conn, currency)
+        row = conn.execute("SELECT active FROM currencies WHERE code = ?",
+                           (code,)).fetchone()
+        if not row:
+            raise L.LedgerError(f"no currency {code}")
+        if bool(row["active"]) == active:
+            raise L.LedgerError(f"{code} is already {'on' if active else 'off'}")
+        conn.execute("UPDATE currencies SET active = ? WHERE code = ?", (int(active), code))
+        L._log(conn, admin_id, "set_currency_active", code, active=active, reason=reason)
+
+
+def set_price(conn, currency, rate, *, admin_id, now=None, void_quotes=False):
+    """rate = LYD for 1 unit of the currency, up to 6 decimals, e.g. '7.85'.
+    Every price ever set is kept. Quotes keep their price for QUOTE_MINUTES,
+    unless void_quotes=True: then no quote taken before this price can be used
+    (to correct a wrong price). Can be set while the currency is switched off."""
+    r = _decimal(rate, 6, "rate")
+    if not isinstance(void_quotes, bool):
+        raise L.LedgerError("void_quotes must be true or false")
+    with L._write(conn):
+        L._require_admin(conn, admin_id)
+        if not conn.execute("SELECT 1 FROM currencies WHERE code = ?",
+                            (currency,)).fetchone():
+            raise L.LedgerError(f"{currency} is not available")
         cur = conn.execute(
-            "INSERT INTO prices(currency, rate, set_by, set_at) VALUES (?,?,?,?)",
-            (currency, str(r), admin_id, _now(now).isoformat()))
-        L._log(conn, admin_id, "set_price", currency, rate=str(r))
+            "INSERT INTO prices(currency, rate, set_by, set_at, voids_quotes) "
+            "VALUES (?,?,?,?,?)",
+            (currency, str(r), admin_id, _now(now).isoformat(), int(void_quotes)))
+        L._log(conn, admin_id, "set_price", currency, rate=str(r), void_quotes=void_quotes)
         return cur.lastrowid
 
 
 def current_price(conn, currency):
     row = conn.execute(
-        "SELECT rate, set_at FROM prices WHERE currency = ? ORDER BY id DESC LIMIT 1",
+        "SELECT id, rate, set_at FROM prices WHERE currency = ? ORDER BY id DESC LIMIT 1",
         (currency,)).fetchone()
     return dict(row) if row else None
 
 
 def add_supplier(conn, name, country=None, *, admin_id):
-    """A supplier who pays beneficiaries abroad. Gets a ledger account SUP_<id>."""
+    """A supplier who pays beneficiaries abroad. Gets a ledger account SUP_<id>.
+    Names are unique (ignoring case), so a double submit can't make two."""
+    name = name.strip() if isinstance(name, str) else ""
+    if not name:
+        raise L.LedgerError("supplier name is required")
     with L._write(conn):
         L._require_admin(conn, admin_id)
+        if conn.execute("SELECT 1 FROM suppliers WHERE lower(name) = lower(?)",
+                        (name,)).fetchone():
+            raise L.Conflict(f"a supplier called {name} already exists")
         cur = conn.execute("INSERT INTO suppliers(name, country) VALUES (?,?)",
-                           (name.strip(), country))
+                           (name, country))
         supplier_id = cur.lastrowid
         conn.execute("INSERT INTO accounts(kind, code) VALUES ('supplier', ?)",
                      (f"SUP_{supplier_id}",))
@@ -275,9 +328,9 @@ def get_quote(conn, customer_id, currency, foreign_amount, *, now=None):
         quote_id = secrets.token_urlsafe(12)
         expires = now + timedelta(minutes=QUOTE_MINUTES)
         conn.execute(
-            "INSERT INTO quotes(id, customer_id, currency, foreign_amount, rate, cost, "
-            "created_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
-            (quote_id, customer_id, currency, str(amount), str(rate), cost,
+            "INSERT INTO quotes(id, customer_id, currency, foreign_amount, rate, price_id, "
+            "cost, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (quote_id, customer_id, currency, str(amount), str(rate), price["id"], cost,
              now.isoformat(), expires.isoformat()))
     return {"quote_id": quote_id, "currency": currency, "amount": str(amount),
             "rate": str(rate), "cost": cost, "expires_at": expires.isoformat()}
@@ -312,6 +365,9 @@ def place_order(conn, customer_id, quote_id, beneficiary_name, beneficiary_id, *
         if now >= datetime.fromisoformat(q["expires_at"]):
             raise QuoteExpired("price expired, get a new one")
         _active_currency(conn, q["currency"])
+        if conn.execute("SELECT 1 FROM prices WHERE currency = ? AND id > ? "
+                        "AND voids_quotes = 1", (q["currency"], q["price_id"])).fetchone():
+            raise QuoteExpired("the price was corrected, get a new one")
         receipt = _new_receipt_code(conn)
         txn = L._charge_order(conn, customer_id, q["cost"], order_ref=receipt,
                               idempotency_key=f"quote:{quote_id}")
@@ -396,7 +452,8 @@ def pay_supplier(conn, supplier_id, amount, *, admin_id, from_code, reference,
     with L._write(conn):
         L._require_admin(conn, admin_id)
         idem = L._idempotent(conn, idempotency_key, admin_id, "settlement",
-                             supplier_id=supplier_id, amount=amount, from_code=from_code)
+                             supplier_id=supplier_id, amount=amount, from_code=from_code,
+                             reference=ref)
         if idem.existing:
             return idem.existing
         txn = L._post(conn, "settlement",
