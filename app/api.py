@@ -62,8 +62,11 @@ def _reversal_note(conn, txn_id):
 # ---------- worker: sending ----------
 
 def _recipient(conn, phone, sender_id):
+    """The worker to send to. A blocked or closed one gets the same answer as
+    an unknown phone, so nobody learns from it that a colleague was blocked."""
     other = L.find_user_by_phone(conn, phone)
-    if other is None or other["role"] != "customer" or not other["active"]:
+    if (other is None or other["role"] != "customer" or not other["active"]
+            or other["blocked"]):
         raise L.UnknownAccount("no worker with that phone number")
     if other["id"] == sender_id:
         raise L.LedgerError("cannot send to yourself")
@@ -84,8 +87,12 @@ def send_money(conn, token, to_phone, amount, *, idempotency_key, note=None):
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise L.LedgerError("idempotency key is required")
     other = _recipient(conn, to_phone, user["id"])
-    txn = L.transfer(conn, user["id"], other["id"], L.parse_lyd(amount),
-                     idempotency_key=idempotency_key, note=note)
+    try:
+        txn = L.transfer(conn, user["id"], other["id"], L.parse_lyd(amount),
+                         idempotency_key=idempotency_key, note=note)
+    except (L.AccountBlocked, L.UnknownAccount):
+        _recipient(conn, to_phone, user["id"])     # blocked or closed just now: as unknown
+        raise
     return {"txn_id": txn, "to": other["name"],
             "balance": _money(L.balance(conn, user["id"]))}
 

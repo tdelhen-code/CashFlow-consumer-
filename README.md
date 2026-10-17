@@ -48,8 +48,11 @@ other, and order foreign currency paid from their balance.
 
 Users (in `app/ledger.py`):
 - phone numbers must be Libyan mobiles and are stored as `+2189XXXXXXXX` however
-  they are typed (`find_user_by_phone`); an optional WhatsApp number can be from
-  any country (`set_whatsapp`);
+  they are typed (`find_user_by_phone`): spaces, dashes, dots, brackets and the
+  invisible direction marks of a number copied from Arabic text are ignored, and
+  Arabic-Indic or Persian digits (`٠٩١ ١٢٣ ٤٥٦٧`) are read as 0-9; any other
+  character (digits of other scripts, `²`) is refused. An optional WhatsApp
+  number can be from any country (`set_whatsapp`), read the same way;
 - `block_user` / `unblock_user` freeze a worker while a problem or suspicion is
   checked: no sending, receiving, quotes, orders or cash, but salary and deposits
   still arrive; a blocked admin loses admin rights. Their open orders are held:
@@ -102,7 +105,8 @@ Login (`app/auth.py`) and what the web app calls (`app/api.py`):
   reset or changed, or the user was blocked or logged out). Blocking or
   deactivating someone logs them out at once;
 - `app/api.py` acts as the logged-in user: balance, statement (without admins'
-  reversal reasons), send money by phone, prices, quotes, orders (without
+  reversal reasons), send money by phone (a blocked or closed colleague gets
+  the same answer as an unknown number), prices, quotes, orders (without
   supplier or margin details). Admin screens get the admin's id with
   `api.admin_id(conn, token)`.
 
@@ -125,20 +129,50 @@ Run it locally (plain http, so the cookie is allowed without HTTPS):
 
     python3 -m app.web --db wallet.db --port 8000 --insecure-cookies
 
+The bundled server handles requests on 8 threads, each keeping its database
+connection from one request to the next, and lets go of a client that sends
+nothing for 30 seconds.
+
 In production, serve `make_app("/path/wallet.db", trust_proxy=True)` with a WSGI
-server (waitress, gunicorn) behind HTTPS. JSON in and out; POSTs must be
-`Content-Type: application/json`. The session is an HttpOnly, SameSite=Strict
-cookie, or `Authorization: Bearer <token>`. Login, setup-password and
-change-password are limited to 20 tries per address per 10 minutes. Errors:
-`{"error", "type"}` with 400 (bad input), 401 (log in; also a wrong or unknown
-login, or a locked one), 403 (not allowed / blocked, including a blocked
-worker's order; `WrongPassword` for a wrong current password on
-change-password, which doesn't log out), 404, 409 (balance, cash, quote expired
-or price corrected, already exists, payroll batch already posted, quote already
-used for another beneficiary, order already with a supplier or with another one
-than given, password changed meanwhile), 415, 429 (too many tries from an
-address; `AccountLocked` when a logged-in user's current-password tries are
-locked), 500 (nothing internal shown).
+server (waitress, gunicorn) behind HTTPS (nginx, Caddy) that sets
+`X-Forwarded-For`; without `trust_proxy` every client looks like the proxy, so
+they all share one login limit. JSON in and out; POSTs must be
+`Content-Type: application/json` with a plain `Content-Length` (a negative or
+non-numeric one is a 400; none means an empty body). The session is an
+HttpOnly, SameSite=Strict cookie (found among any other cookies the browser
+sends), or `Authorization: Bearer <token>`.
+
+Limits (429 when reached). They are kept in memory, per server process: run
+one process (waitress, or `gunicorn -w 1 --threads 8`), or also limit at the
+proxy; with several processes each one allows as much again:
+- failed login, setup-password and change-password tries: 20 per client
+  address per 10 minutes, an IPv6 address counting per /64. Successful tries
+  don't count, so an office full of workers behind one address can log in;
+- each worker's `POST /api/send`, `/api/quote`, `/api/orders` and
+  `GET /api/recipient`: 30 a minute.
+
+Fields: text must be a JSON string (a number, list or object is a 400) of at
+most 100 characters for `name`, `beneficiary_name`, `beneficiary_id`,
+`country` and references (`reference`, `payout_ref`, `batch_ref`,
+`receipt_code`), 500 for a `reason`, and 200 for a `note`, `idempotency_key`
+or any other text. Amounts and rates are text such as `"12.5"` (a whole JSON
+number is taken too, a fraction such as `12.5` is not: it may not be exactly
+what was typed); ids are whole numbers. An optional field sent as `""` or
+only spaces counts as left out: no WhatsApp number, the agreed rate on assign,
+no fee. `.../whatsapp` needs its field: `null` or `""` removes the number, and
+a body without it is a 400 that changes nothing.
+
+Errors: `{"error", "type"}` with 400 (bad input: a field missing, of the wrong
+type or too long), 401 (log in; also a wrong or unknown login, or a locked
+one), 403 (not allowed / blocked, including a blocked worker's order;
+`WrongPassword` for a wrong current password on change-password, which doesn't
+log out), 404 (also a colleague to send to who is blocked or closed, like an
+unknown number), 409 (balance, cash, quote expired or price corrected, already
+exists, payroll batch already posted, quote already used for another
+beneficiary, order already with a supplier or with another one than given,
+password changed meanwhile), 413, 415, 429 (see the limits; `AccountLocked`
+when a logged-in user's current-password tries are locked), 500 (nothing
+internal shown).
 
 `idempotency_key` (text, at most 200 characters) is required on `POST /api/send`
 and on the admin money routes `/api/admin/deposit`, `/payroll`, `/withdraw`,
@@ -150,7 +184,7 @@ transaction can be reversed only once anyway). A missing or blank key is a 400.
 |---|---|
 | Everyone | `POST /api/login`, `/api/setup-password`, `/api/logout`, `/api/logout-everywhere`, `/api/change-password` |
 | Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send`, `/api/quote`, `/api/orders` |
-| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`; `POST /api/admin/users` (returns the setup code; `reason` optional, "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason}`, required for an admin's account), `.../whatsapp`, `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (`{reason}`: lifts a lock from wrong tries) |
+| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`; `POST /api/admin/users` (returns the setup code; `reason` optional, "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (`{reason}`: lifts a lock from wrong tries) |
 | Admin: money | `POST /api/admin/deposit`, `/payroll`, `/withdraw`, `/move`, `/reverse`, `/tills`, `/reconcile`; `GET /api/admin/health` |
 | Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`), `/suppliers`, `/suppliers/<id>/price`, `/suppliers/<id>/pay`, `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?}`); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
 

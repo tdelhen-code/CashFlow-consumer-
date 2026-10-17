@@ -30,6 +30,26 @@ class PhoneTests(unittest.TestCase):
             with self.assertRaises(L.LedgerError, msg=typed):
                 L.normalize_whatsapp(typed)
 
+    def test_arabic_indic_digits_are_read_and_other_scripts_refused(self):
+        # As typed on Arabic and Persian keyboards, alone or mixed with 0-9, and
+        # as pasted from right-to-left text (direction marks, other dashes).
+        for typed in ("٠٩١٢٣٤٥٦٧٨", "۰۹۱۲۳۴۵۶۷۸", "٠٩١ ٢٣٤ ٥٦٧٨", "+٢١٨ ٩١ ٢٣٤ ٥٦٧٨",
+                      "091234567٨", "091\u2013234\u20135678", "091\u00a0234\u00a05678",
+                      "\u202a+218 91 234 5678\u202c", "\u200e0912345678"):
+            self.assertEqual(L.normalize_phone(typed), "+218912345678", ascii(typed))
+        # Any other non-ASCII character, digits from other scripts included,
+        # is refused rather than stored as it was typed.
+        for typed in ("091234567²", "０９１２３４５６７８", "091234567२",
+                      "0912345678\u200b", "٠٩١٢٣٤٥٦٧٨x"):
+            with self.assertRaises(L.LedgerError, msg=ascii(typed)):
+                L.normalize_phone(typed)
+        self.assertEqual(L.normalize_whatsapp("+٢٠ ١٠٠ ١٢٣ ٤٥٦٧"), "+201001234567")
+        self.assertEqual(L.normalize_whatsapp("+۲۱۸ ۹۲ ۱۲۳ ۴۵۶۷"), "+218921234567")
+        self.assertEqual(L.normalize_whatsapp("٠٩٢ ١٢٣ ٤٥٦٧"), "+218921234567")
+        for typed in ("+20100123456²", "+２０１００１２３４５６７"):
+            with self.assertRaises(L.LedgerError, msg=ascii(typed)):
+                L.normalize_whatsapp(typed)
+
 
 class UserTests(unittest.TestCase):
     def setUp(self):
@@ -56,6 +76,18 @@ class UserTests(unittest.TestCase):
         with self.assertRaises(L.LedgerError):
             L.create_user(self.db, "customer", "Ali again", "00218911111111",
                           admin_id=self.admin)
+
+    def test_same_number_in_arabic_indic_digits_is_the_same_number(self):
+        for typed in ("091111111١", "٠٩١١١١١١١١"):
+            with self.assertRaises(L.LedgerError, msg=ascii(typed)):
+                L.create_user(self.db, "customer", "Ali again", typed, admin_id=self.admin)
+            self.assertEqual(L.find_user_by_phone(self.db, typed)["id"], self.ali)
+        omar = L.create_user(self.db, "customer", "Omar", "0931234567", admin_id=self.admin,
+                             whatsapp="+٢١٨ ٩٣ ١٢٣ ٤٥٦٧")     # his own phone: not kept
+        self.assertIsNone(L.find_user_by_phone(self.db, "0931234567")["whatsapp"])
+        L.set_whatsapp(self.db, omar, "+٢٠ ١٠٠ ١٢٣ ٤٥٦٧", admin_id=self.admin)
+        self.assertEqual(L.find_user_by_phone(self.db, "0931234567")["whatsapp"],
+                         "+201001234567")
 
     def test_whatsapp_can_be_changed_and_is_dropped_when_same_as_phone(self):
         L.set_whatsapp(self.db, self.sam, "+216 20 123 456", admin_id=self.admin)

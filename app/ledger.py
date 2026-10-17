@@ -188,10 +188,31 @@ def parse_lyd(text):
     return int(dirhams)
 
 
+# Arabic-Indic (٠-٩) and Extended Arabic-Indic (۰-۹, Persian) digits, as typed
+# on Arabic and Persian keyboards, are the digits 0-9.
+_EASTERN_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "0123456789" * 2)
+# What may stand between the digits of a phone number: spaces, dashes, dots,
+# brackets, and the invisible direction marks a number copied from
+# right-to-left text carries.
+_PHONE_SEPARATORS = re.compile(
+    r"[\s\-().\u2010-\u2015\u2212\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _phone_text(text, what="phone number"):
+    """A typed number with the digits in 0-9 and no separators. Anything else
+    that is not ASCII (digits of other scripts, ²...) is refused, so a number
+    is never stored as typed, past the duplicate check."""
+    text = _PHONE_SEPARATORS.sub("", str(text or "").translate(_EASTERN_DIGITS))
+    if not text.isascii():
+        raise LedgerError(f"{what}: digits only")
+    return text
+
+
 def normalize_phone(text):
     """Any usual way of writing a Libyan mobile -> '+2189XXXXXXXX'.
-    Accepts 091-1234567, 0911234567, 911234567, +218 91 123 4567, 00218..."""
-    digits = re.sub(r"[\s\-().]", "", str(text or ""))
+    Accepts 091-1234567, 0911234567, 911234567, +218 91 123 4567, 00218...,
+    also in Arabic-Indic digits (٠٩١ ١٢٣ ٤٥٦٧)."""
+    digits = _phone_text(text)
     if digits.startswith("+"):
         digits = digits[1:]
     elif digits.startswith("00"):
@@ -210,7 +231,7 @@ def normalize_phone(text):
 def normalize_whatsapp(text):
     """WhatsApp number from any country -> '+<country><number>'. A number written
     the local way (starting with a single 0) is taken as Libyan."""
-    raw = re.sub(r"[\s\-().]", "", str(text or ""))
+    raw = _phone_text(text, "WhatsApp number")
     if raw.startswith("+"):
         digits = raw[1:]
     elif raw.startswith("00"):

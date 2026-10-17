@@ -1,12 +1,16 @@
+import http.client
 import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 import unittest.mock
 from wsgiref.util import setup_testing_defaults
 
 from app import auth as A
+from app import ledger as L
 from app import web
 
 
@@ -76,6 +80,29 @@ class WebTests(unittest.TestCase):
             "phone": phone, "code": made["setup_code"], "password": password})
         self.assertEqual(status, 200, body)
         return made["id"], client
+
+    def call(self, environ):
+        """The app called with a hand-made environ: (status, JSON answer)."""
+        environ = dict({"REQUEST_METHOD": "POST", "PATH_INFO": "/api/login",
+                        "REMOTE_ADDR": "10.0.5.5", "CONTENT_TYPE": "application/json"},
+                       **environ)
+        setup_testing_defaults(environ)
+        captured = {}
+
+        def start_response(status, headers):
+            captured["status"] = int(status.split()[0])
+        payload = json.loads(b"".join(self.app(environ, start_response)))
+        return captured["status"], payload
+
+    def setup_orders(self, worker_id):
+        for path, body in (
+                ("/api/admin/deposit", {"user_id": worker_id, "amount": "1000",
+                                        "into": "BANK", "idempotency_key": "setup"}),
+                ("/api/admin/currencies", {"code": "USD"}),
+                ("/api/admin/prices", {"currency": "USD", "rate": "7.85"}),
+                ("/api/admin/suppliers", {"name": "Cairo agent"}),
+                ("/api/admin/suppliers/1/price", {"currency": "USD", "rate": "7.80"})):
+            self.assertEqual(self.admin.post(path, body)[0], 200, path)
 
     # --- the whole worker journey ---
     def test_worker_journey(self):
@@ -465,6 +492,325 @@ class WebTests(unittest.TestCase):
         ali_row = next(u for u in users["users"] if u["id"] == ali_id)
         self.assertEqual((ali_row["blocked"], ali_row["blocked_reason"]), (1, "doubt"))
         self.assertEqual(self.admin.post(f"/api/admin/users/{ali_id}/block", {})[0], 400)
+
+    def test_blocked_or_closed_colleague_looks_like_an_unknown_number(self):
+        ali_id, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        sam_id, _ = self.new_worker("Sam", "0922222222", "sam-wallet-88")
+        omar_id, _ = self.new_worker("Omar", "0933333333", "omar-wallet-99")
+        self.admin.post("/api/admin/deposit", {"user_id": ali_id, "amount": "10",
+                                               "into": "BANK", "idempotency_key": "d1"})
+        self.assertEqual(self.admin.post(f"/api/admin/users/{sam_id}/block",
+                                         {"reason": "suspected fraud"})[0], 200)
+        self.assertEqual(self.admin.post(f"/api/admin/users/{omar_id}/deactivate",
+                                         {"reason": "left"})[0], 200)
+        unknown = ali.get("/api/recipient?phone=0944444444")
+        self.assertEqual(unknown, (404, {"error": "no worker with that phone number",
+                                         "type": "UnknownAccount"}))
+        for phone in ("0922222222", "0933333333"):
+            self.assertEqual(ali.get(f"/api/recipient?phone={phone}"), unknown, phone)
+            self.assertEqual(ali.post("/api/send", {"to_phone": phone, "amount": "1",
+                                                    "idempotency_key": phone}), unknown)
+
+        # Blocked between the lookup and the transfer: still the same answer,
+        # not "user 3 is blocked".
+        real = L.find_user_by_phone
+        looked_up = []
+
+        def stale(conn, phone):
+            row = real(conn, phone)
+            if not looked_up:
+                row = dict(row, blocked=0)
+            looked_up.append(phone)
+            return row
+        with unittest.mock.patch.object(L, "find_user_by_phone", stale):
+            self.assertEqual(ali.post("/api/send", {"to_phone": "0922222222", "amount": "1",
+                                                    "idempotency_key": "race"}), unknown)
+        self.assertEqual(ali.get("/api/me")[1]["balance"]["lyd"], "10.000")
+
+    # --- wrong types, odd input and limits never crash the server ---
+    def test_wrong_json_types_are_refused_not_crashed(self):
+        ali_id, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        self.new_worker("Sam", "0922222222", "sam-wallet-88")
+        self.setup_orders(ali_id)
+        _, quote = ali.post("/api/quote", {"currency": "USD", "amount": "10"})
+        good_order = {"quote_id": quote["quote_id"], "beneficiary_name": "Ahmed",
+                      "beneficiary_id": "A1"}
+        _, order = ali.post("/api/orders", good_order)
+        send = {"to_phone": "0922222222", "amount": "1", "idempotency_key": "s1"}
+        payroll = {"batch_ref": "OCT", "idempotency_key": "p1"}
+        anon = Client(self.app, ip="10.0.9.9")
+        admin = self.admin
+        cases = [
+            (ali, "/api/send", dict(send, note={"a": 1}), 400),
+            (ali, "/api/send", dict(send, amount=1.5), 400),     # a fraction may not be exact
+            (ali, "/api/send", dict(send, to_phone=922222222), 400),
+            (ali, "/api/quote", {"currency": 840, "amount": "10"}, 400),
+            (ali, "/api/quote", {"currency": "USD", "amount": [10]}, 400),
+            (ali, "/api/orders", dict(good_order, beneficiary_id=119900123456), 400),
+            (ali, "/api/orders", dict(good_order, beneficiary_name=["Ahmed"]), 400),
+            (ali, "/api/orders", dict(good_order, beneficiary_name="\u200f"), 400),
+            (ali, "/api/orders", dict(good_order, quote_id=[quote["quote_id"]]), 400),
+            (ali, "/api/orders", dict(good_order, quote_id={"id": 1}), 400),
+            (anon, "/api/login", {"phone": 911111111, "password": "ali-wallet-77"}, 400),
+            (anon, "/api/setup-password", {"phone": "0911111111", "code": 23456789,
+                                           "password": "new-wallet-99"}, 400),
+            (admin, f"/api/admin/users/{ali_id}/block", {"reason": 5}, 400),
+            (admin, "/api/admin/users", {"name": 5, "phone": "0944444444"}, 400),
+            (admin, "/api/admin/users", {"name": "Omar", "phone": "0944444444",
+                                         "whatsapp": 201001234567}, 400),
+            (admin, "/api/admin/orders/paid", {"receipt_code": order["receipt_code"],
+                                               "payout_ref": 778812}, 400),
+            (admin, "/api/admin/suppliers/1/pay", {"amount": "1", "from": "BANK",
+                                                   "reference": 1234,
+                                                   "idempotency_key": "k1"}, 400),
+            (admin, "/api/admin/move", {"from": ["BANK"], "to": "TILL_X", "amount": "1",
+                                        "idempotency_key": "m1"}, 400),
+            (admin, "/api/admin/prices", {"currency": ["USD"], "rate": "7.9"}, 400),
+            (admin, "/api/admin/suppliers", {"name": "Tunis", "country": ["TN"]}, 400),
+            (admin, "/api/admin/deposit", {"user_id": 2**64, "amount": "1", "into": "BANK",
+                                           "idempotency_key": "d2"}, 400),
+            (admin, "/api/admin/payroll", dict(payroll, items=[{"user_id": ali_id + 0.9,
+                                                                "amount": "1"}]), 400),
+            (admin, "/api/admin/payroll", dict(payroll, items=[{"user_id": True,
+                                                                "amount": "1"}]), 400),
+            (admin, "/api/admin/payroll", dict(payroll, items=["x"]), 400),
+            (admin, "/api/admin/payroll", dict(payroll, items=[{"user_id": ali_id,
+                                                                "amount": 0.1}]), 400),
+            (admin, "/api/admin/reconcile", {"counts": {"BANK": [1]}}, 400),
+            (admin, "/api/admin/orders/99999999999999999999/assign", {"supplier_id": 1}, 404),
+        ]
+        for client, path, body, expected in cases:
+            status, answer = client.post(path, body)
+            self.assertEqual(status, expected, (path, body, answer))
+            self.assertNotEqual(answer["type"], "internal")
+        status, answer = admin.get("/api/admin/margin?until=9999-12-31T23:59:59-01:00")
+        self.assertEqual(status, 400, answer)
+
+        # Text that is not valid Unicode (a lone surrogate) and JSON nested
+        # too deep for the parser are refused like any other bad body.
+        _, code = admin.post(f"/api/admin/users/{ali_id}/setup-code", {})
+        for raw in (b'{"phone": "0911111111", "code": "%s", "password": "\\ud800-wallet-77"}'
+                    % code["setup_code"].encode(),
+                    b'{"phone": "0911111111", "code": "\\udfff", "password": "ali-wallet-78"}',
+                    b'{"a": ' + b"[" * 30000 + b"]" * 30000 + b"}"):
+            status, answer = anon.post("/api/setup-password", raw=raw)
+            self.assertEqual(status, 400, answer)
+        status, statement = admin.get(f"/api/admin/users/{ali_id}/statement")
+        self.assertEqual(statement["balance"]["lyd"], "921.500")     # nothing credited
+
+    def test_content_length_must_be_a_plain_size(self):
+        body = json.dumps({"phone": "0910000000", "password": "Office-Pass-2026",
+                           "padding": "x" * web.MAX_BODY_BYTES}).encode()
+        for length in ("-1", "-100", "1e3", "+5", "0x10", "١٢"):
+            stream = io.BytesIO(body)
+            status, answer = self.call({"CONTENT_LENGTH": length, "wsgi.input": stream})
+            self.assertEqual((status, answer["error"]), (400, "bad Content-Length"), length)
+            self.assertEqual(stream.tell(), 0, length)          # nothing was read
+        stream = io.BytesIO(body)                               # no length: no body
+        status, answer = self.call({"wsgi.input": stream})
+        self.assertEqual((status, answer["error"]), (400, "'phone' is required"))
+        self.assertEqual(stream.tell(), 0)
+        status, _ = self.call({"CONTENT_LENGTH": "9" * 5000, "wsgi.input": io.BytesIO()})
+        self.assertEqual(status, 413)
+
+    def test_text_fields_have_a_length_limit(self):
+        ali_id, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        self.new_worker("Sam", "0922222222", "sam-wallet-88")
+        self.setup_orders(ali_id)
+        send = {"to_phone": "0922222222", "amount": "0.001"}
+        status, answer = ali.post("/api/send", dict(send, idempotency_key="n1",
+                                                    note="x" * 201))
+        self.assertEqual(status, 400)
+        self.assertIn("'note' is too long", answer["error"])
+        self.assertEqual(ali.post("/api/send", dict(send, idempotency_key="n2",
+                                                    note="x" * 200))[0], 200)
+        self.assertEqual(ali.post("/api/send", dict(send, idempotency_key="k" * 201))[0], 400)
+        _, quote = ali.post("/api/quote", {"currency": "USD", "amount": "10"})
+        order = {"quote_id": quote["quote_id"], "beneficiary_name": "A" * 101,
+                 "beneficiary_id": "A1"}
+        self.assertEqual(ali.post("/api/orders", order)[0], 400)
+        self.assertEqual(ali.post("/api/orders", dict(order, beneficiary_name="Ahmed",
+                                                      beneficiary_id="1" * 101))[0], 400)
+        status, placed = ali.post("/api/orders", dict(order, beneficiary_name="A" * 100))
+        self.assertEqual(status, 200, placed)
+        for path, body in (
+                ("/api/admin/users", {"name": "N" * 101, "phone": "0944444444"}),
+                (f"/api/admin/users/{ali_id}/block", {"reason": "r" * 501}),
+                ("/api/admin/suppliers", {"name": "S" * 101}),
+                ("/api/admin/suppliers", {"name": "Tunis", "country": "C" * 101}),
+                ("/api/admin/payroll", {"items": [{"user_id": ali_id, "amount": "1"}],
+                                        "batch_ref": "B" * 101, "idempotency_key": "p"}),
+                ("/api/admin/orders/paid", {"receipt_code": placed["receipt_code"],
+                                            "payout_ref": "P" * 101})):
+            status, answer = self.admin.post(path, body)
+            self.assertEqual(status, 400, (path, answer))
+            self.assertIn("is too long", answer["error"])
+        self.assertEqual(self.admin.post(f"/api/admin/users/{ali_id}/block",
+                                         {"reason": "r" * 500})[0], 200)
+
+    def test_worker_money_and_order_requests_are_limited_per_worker(self):
+        _, ali = self.new_worker("Ali", "0911111111", "ali-wallet-77")
+        _, sam = self.new_worker("Sam", "0922222222", "sam-wallet-88")
+        nothing = {"currency": "XYZ", "amount": "1"}
+        for _ in range(web.WORKER_REQUESTS_PER_MINUTE):
+            self.assertEqual(ali.post("/api/quote", nothing)[0], 400)
+        for status, answer in (
+                ali.post("/api/quote", nothing),
+                ali.post("/api/send", {"to_phone": "0922222222", "amount": "1",
+                                       "idempotency_key": "s"}),
+                ali.post("/api/orders", {"quote_id": "q", "beneficiary_name": "A",
+                                         "beneficiary_id": "1"}),
+                ali.get("/api/recipient?phone=0922222222")):
+            self.assertEqual((status, answer["type"]), (429, "http"))
+        self.assertEqual(ali.get("/api/me")[0], 200)                # reading isn't limited
+        self.assertEqual(sam.post("/api/quote", nothing)[0], 400)   # nor other workers
+        later = time.monotonic() + 61
+        with unittest.mock.patch.object(self.app.worker_limiter, "clock", lambda: later):
+            self.assertEqual(ali.post("/api/quote", nothing)[0], 400)
+
+    def test_blank_optional_fields_count_as_left_out(self):
+        status, made = self.admin.post("/api/admin/users", {
+            "name": "Ali", "phone": "0911111111", "whatsapp": "", "role": "",
+            "language": " ", "reason": ""})
+        self.assertEqual(status, 200, made)
+        ali_id = made["id"]
+        ali = Client(self.app, ip="10.0.1.50")
+        self.assertEqual(ali.post("/api/setup-password", {
+            "phone": "0911111111", "code": made["setup_code"],
+            "password": "ali-wallet-77"})[0], 200)
+
+        def whatsapp():
+            users = self.admin.get("/api/admin/users")[1]["users"]
+            return next(u["whatsapp"] for u in users if u["id"] == ali_id)
+        self.assertIsNone(whatsapp())
+        path = f"/api/admin/users/{ali_id}/whatsapp"
+        self.assertEqual(self.admin.post(path, {"whatsapp": "+20 100 123 4567"})[0], 200)
+        self.assertEqual(self.admin.post(path, {})[0], 400)         # left out: unchanged
+        self.assertEqual(whatsapp(), "+201001234567")
+        for blank in ("", None):                                    # blank or null: removed
+            self.assertEqual(self.admin.post(path, {"whatsapp": blank})[0], 200)
+            self.assertIsNone(whatsapp())
+            self.admin.post(path, {"whatsapp": "+20 100 123 4567"})
+
+        self.setup_orders(ali_id)
+        self.assertEqual(self.admin.post("/api/admin/suppliers",
+                                         {"name": "Tunis agent", "country": ""})[0], 200)
+        suppliers = self.admin.get("/api/admin/suppliers")[1]["suppliers"]
+        self.assertIsNone(suppliers[1]["country"])
+        _, quote = ali.post("/api/quote", {"currency": "USD", "amount": "10"})
+        _, order = ali.post("/api/orders", {"quote_id": quote["quote_id"],
+                                            "beneficiary_name": "Ahmed",
+                                            "beneficiary_id": "A1"})
+        status, answer = self.admin.post(f"/api/admin/orders/{order['id']}/assign",
+                                         {"supplier_id": 1, "rate": ""})
+        self.assertEqual(status, 200, answer)
+        orders = self.admin.get("/api/admin/orders")[1]["orders"]
+        self.assertEqual(orders[0]["supplier_rate"], "7.80")       # the agreed rate
+        self.assertEqual(self.admin.post("/api/admin/orders/paid", {
+            "receipt_code": order["receipt_code"], "payout_ref": "EG-1",
+            "supplier_id": ""})[0], 200)
+        self.assertEqual(self.admin.post("/api/admin/tills", {"name": "main"})[0], 200)
+        self.admin.post("/api/admin/move", {"from": "BANK", "to": "TILL_MAIN", "amount": "50",
+                                            "idempotency_key": "m"})
+        status, answer = self.admin.post("/api/admin/withdraw", {
+            "user_id": ali_id, "amount": "10", "fee": "", "from_till": "TILL_MAIN",
+            "note": " ", "idempotency_key": "w"})
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(ali.get("/api/me")[1]["balance"]["lyd"], "911.500")
+
+    # --- login limits: only failures count, memory stays small ---
+    def test_only_failed_logins_count_against_an_address(self):
+        office = Client(self.app, ip="198.51.100.20")
+        login = {"phone": "0910000000", "password": "Office-Pass-2026"}
+        for _ in range(web.LOGIN_TRIES_PER_IP + 5):         # a whole office logging in
+            self.assertEqual(office.post("/api/login", login)[0], 200)
+        for _ in range(web.LOGIN_TRIES_PER_IP + 5):         # refused before any check
+            self.assertEqual(office.post("/api/login", {})[0], 400)
+        self.assertEqual(office.post("/api/login", login)[0], 200)
+        for i in range(web.LOGIN_TRIES_PER_IP):
+            self.assertEqual(office.post("/api/login", {"phone": f"09{i % 5 + 1}1234567",
+                                                        "password": "guess-guess"})[0], 401)
+        self.assertEqual(office.post("/api/login", login)[0], 429)
+
+    def test_ipv6_addresses_count_per_64_block(self):
+        login = {"phone": "0910000000", "password": "Office-Pass-2026"}
+        for i in range(web.LOGIN_TRIES_PER_IP):
+            status, _ = Client(self.app, ip=f"2001:db8:5:6::{i + 1:x}").post(
+                "/api/login", {"phone": f"09{i % 5 + 1}1234567", "password": "guess-guess"})
+            self.assertEqual(status, 401)
+        self.assertEqual(Client(self.app, ip="2001:db8:5:6:abcd::1").post(
+            "/api/login", login)[0], 429)
+        self.assertEqual(Client(self.app, ip="2001:db8:5:7::1").post(
+            "/api/login", login)[0], 200)
+        self.assertEqual(web.client_key("::ffff:203.0.113.9"), "203.0.113.9")
+        self.assertEqual(web.client_key("203.0.113.9"), "203.0.113.9")
+        self.assertEqual(web.client_key("not an address"), "not an address")
+
+    def test_rate_limiter_forgets_old_keys_and_stays_small(self):
+        now = [0.0]
+        limiter = web.RateLimiter(2, 60, clock=lambda: now[0], max_keys=100)
+        for i in range(100):
+            limiter.check(f"10.0.0.{i}")
+        limiter.check("one more")                  # the least recently seen makes room
+        self.assertEqual(len(limiter.hits), 100)
+        self.assertNotIn("10.0.0.0", limiter.hits)
+        now[0] = 61
+        limiter.check("10.9.9.9")                  # everything older than the window goes
+        self.assertEqual(list(limiter.hits), ["10.9.9.9"])
+        limiter.forgive("10.9.9.9", 61)            # a try that went fine doesn't count
+        self.assertEqual(list(limiter.hits), [])
+
+    def test_rate_limit_docs_match_how_it_works(self):
+        self.assertIn('make_app("wallet.db", trust_proxy=True)', web.__doc__)
+        with open(os.path.join(os.path.dirname(__file__), "..", "README.md"),
+                  encoding="utf-8") as f:
+            readme = f.read()
+        self.assertTrue("per server process" in readme, "README: limits are per process")
+
+    # --- cookies and the bundled server ---
+    def test_session_cookie_is_found_among_other_cookies(self):
+        _, body = Client(self.app).post("/api/login", {"phone": "0910000000",
+                                                       "password": "Office-Pass-2026"})
+        token = body["token"]
+        bare = Client(self.app)
+        for header in (f'prefs={{"lang":"ar"}}; theme=dark mode; session={token}',
+                       f"version=1; session={token}", f"path=/x; session={token}",
+                       f"x; session={token}", f"x=café; session={token}",
+                       f'x="unterminated; session={token}', f'session="{token}"',
+                       f"session=; session={token}"):
+            status, answer = bare.get("/api/admin/users", headers={"HTTP_COOKIE": header})
+            self.assertEqual(status, 200, (header, answer))
+        for header in (f"xsession={token}", "session=wrong", ""):
+            status, _ = bare.get("/api/admin/users", headers={"HTTP_COOKIE": header})
+            self.assertEqual(status, 401, header)
+
+    def test_bundled_server_keeps_database_connections(self):
+        server = web.dev_server(self.app, "127.0.0.1", 0)
+        serving = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
+        serving.start()
+
+        def stop():
+            server.shutdown()
+            server.server_close()
+            for worker in server.workers:
+                worker.join(5)
+        self.addCleanup(stop)
+        with unittest.mock.patch.object(web.A, "connect", wraps=A.connect) as opened, \
+                unittest.mock.patch("sys.stderr", io.StringIO()):
+            for _ in range(3 * web.DEV_SERVER_THREADS):
+                http_conn = http.client.HTTPConnection("127.0.0.1", server.server_port,
+                                                       timeout=10)
+                http_conn.request("GET", "/api/me")
+                response = http_conn.getresponse()
+                response.read()
+                http_conn.close()
+                self.assertEqual(response.status, 401)
+        self.assertLessEqual(opened.call_count, web.DEV_SERVER_THREADS)
+
+    def test_login_with_arabic_indic_digits(self):
+        status, _ = Client(self.app).post("/api/login", {"phone": "٠٩١٠٠٠٠٠٠٠",
+                                                         "password": "Office-Pass-2026"})
+        self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":
