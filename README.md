@@ -11,7 +11,10 @@ other, and order foreign currency paid from their balance.
     while the app is in use without reporting differences that aren't there
     (such as a move between the bank and a till counted in neither or both);
   - `admin_log` reads the admin log back, newest first, optionally only one
-    action or one target (`GET /api/admin/log`);
+    action, one kind of target (`user`, `order`, `transaction`, `supplier`,
+    or `code` for a till or currency) and one target (`GET /api/admin/log`).
+    User 2, order 2 and supplier 2 are all target 2, so give the kind with a
+    target; each row says its `target_kind`;
   - an idempotency key, when given, must be non-empty text (at most 200
     characters, spaces around it ignored); a blank key is refused, never taken
     as "no key";
@@ -32,8 +35,10 @@ other, and order foreign currency paid from their balance.
     refused as a conflict if the order is with another supplier by then. An
     order without a supplier (unassigned on the supplier's word that it had not
     paid, then it sends proof that it did) is marked paid only with that
-    `supplier_id`: its agreed rate (or a one-off `rate=`) is locked on in the
-    same step;
+    `supplier_id`, at a one-off `rate=` if given, otherwise at the rate it
+    had when it last held the order (it paid at that rate; the unassign is
+    logged with it), otherwise its agreed rate; it is locked on in the same
+    step;
   - `set_supplier_active` switches a supplier off or on, with a logged reason.
     While off, no order can be assigned to it; its orders already assigned can
     still be marked paid or unassigned, and it can still be paid;
@@ -115,8 +120,8 @@ Login (`app/auth.py`) and what the web app calls (`app/api.py`):
   it and act as the worker (or as another admin). This can't be ruled out while
   admins hand out codes. Instead, issuing a code and using it are both in the
   admin log (who issued it and when; its use is logged under the issuing
-  admin; `GET /api/admin/log?action=issue_setup_code&target=<user id>`), and a
-  code for an admin's account needs a reason. A worker whose code was already
+  admin; `GET /api/admin/log?action=issue_setup_code&kind=user&target=<user
+  id>`), and a code for an admin's account needs a reason. A worker whose code was already
   used, or who is logged out unexpectedly, must report it. Blocking or
   deactivating an admin stops every code they issued that nobody has used yet,
   so a suspected or departed admin can't use one. Later: a second admin
@@ -212,7 +217,9 @@ or any other text. Amounts and rates are text such as `"12.5"` (a whole JSON
 number is taken too, a fraction such as `12.5` is not: it may not be exactly
 what was typed); ids (`user_id`, `txn_id`, `supplier_id`) are whole numbers,
 and a `quote_id` is the text `/api/quote` returned. Currency codes are read in
-any case (`usd` is `USD`). An optional field (marked `?` below) sent as `""` or
+any case (`usd` is `USD`). Text that is only spaces or invisible marks
+(direction marks, the Arabic letter mark, zero-width spaces) is blank: a
+required one is refused. An optional field (marked `?` below) sent as `""` or
 only spaces counts as left out: no WhatsApp number, the agreed rate on assign,
 no fee (but not `idempotency_key`, see below). Lists (`/api/statement`,
 `/api/orders`, the admin statements, `/api/admin/orders` and
@@ -255,7 +262,7 @@ missing key (where required) or a blank one is a 400.
 |---|---|
 | Everyone | `POST /api/login` (`{phone, password}`), `/api/setup-password` (`{phone, code, password}`), `/api/logout` (this session), `/api/logout-everywhere` (every session of this user), `/api/change-password` (`{old_password, new_password}`; ends the other sessions) |
 | Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id}`) |
-| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; both filters optional); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `ar` (default), `en` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
+| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&kind=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; all filters optional; `kind` is `user`, `order`, `transaction`, `supplier` or `code`); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `ar` (default), `en` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
 | Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` |
 | Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/active` (`{active: true/false, reason}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?, rate?}`; an order without a supplier needs `supplier_id`, and `rate` is a one-off rate for it); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
 

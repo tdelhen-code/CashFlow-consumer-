@@ -67,9 +67,9 @@ MAX_TEXT = {
     "idempotency_key": L.MAX_IDEMPOTENCY_KEY,
 }
 MAX_OTHER_TEXT = 200
-# Text that is only spaces or invisible marks (direction marks, zero-width
-# spaces) counts as blank.
-_BLANK = re.compile(r"[\s\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]*")
+# Text that is only spaces or invisible marks (direction marks, the Arabic
+# letter mark, zero-width spaces) counts as blank.
+_BLANK = re.compile(r"[\s\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]*")
 
 ERROR_STATUS = [            # first match wins, so subclasses come first
     (A.WrongPassword, 403), (A.LoginFailed, 401), (A.NotLoggedIn, 401),
@@ -722,11 +722,12 @@ def admin_margin(app, conn, req):
 @route("GET", "/api/admin/log")
 def admin_log(app, conn, req):
     """The admin log, newest first: who issued and used setup codes, unassign,
-    block and cancel reasons... ?action= and ?target= (a user, order or
-    transaction id, a till or currency code) narrow it."""
+    block and cancel reasons... ?action=, ?kind= (user, order, transaction,
+    supplier or code) and ?target= (that id or till/currency code) narrow it."""
     _admin(conn, req)
     return {"entries": L.admin_log(conn, action=req.query.get("action") or None,
                                    target=req.query.get("target") or None,
+                                   kind=req.query.get("kind") or None,
                                    limit=_limit(req))}
 
 

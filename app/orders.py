@@ -24,6 +24,7 @@ it paid moves the cost out of SYS_ORDERS: supplier_cost to the supplier's accoun
 (what we now owe them) and the rest to SYS_MARGIN (negative if we lost on it).
 Paying the supplier from the bank or a till is recorded with pay_supplier.
 """
+import json
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -462,6 +463,18 @@ def _lock_supplier(conn, order, supplier_id, rate, now):
     return rate, supplier_cost
 
 
+def _rate_when_assigned(conn, order_id, supplier_id):
+    """The rate locked when `supplier_id` last held this order (the admin log
+    keeps it after an unassign), or None if it never did."""
+    for row in conn.execute(
+            "SELECT details FROM admin_log WHERE action = 'assign_supplier' AND target = ? "
+            "ORDER BY id DESC", (str(order_id),)):
+        details = json.loads(row["details"])
+        if details.get("supplier_id") == supplier_id:
+            return Decimal(details["rate"])
+    return None
+
+
 def assign_supplier(conn, order_id, supplier_id, *, admin_id, rate=None, now=None):
     """Give a placed order to a supplier and lock what they charge for it: `rate`
     if given (a one-off deal), otherwise their current agreed rate for the
@@ -498,10 +511,11 @@ def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, rat
     log says the worker was blocked); refusing it would leave the books wrong.
     An order with no supplier (placed, e.g. unassigned on the supplier's word
     that it had not paid, then it sends proof it did) is marked paid only with
-    that `supplier_id`: its agreed rate (or `rate`, a one-off deal) is locked
-    onto the order as assign_supplier does, in the same step. That orders no
-    new payout, so it works while the worker is blocked, and for a supplier
-    that is switched off."""
+    that `supplier_id`, at `rate` if given (a one-off deal), otherwise the rate
+    locked when that supplier last held the order (the payout was made at it),
+    otherwise its agreed rate; it is locked onto the order as assign_supplier
+    does, in the same step. That orders no new payout, so it works while the
+    worker is blocked, and for a supplier that is switched off."""
     ref = (payout_ref or "").strip()
     if not ref:
         raise L.LedgerError("the supplier's confirmation reference is required")
@@ -523,9 +537,13 @@ def mark_paid(conn, receipt_code, payout_ref, *, admin_id, supplier_id=None, rat
             if not conn.execute("SELECT 1 FROM suppliers WHERE id = ?",
                                 (supplier_id,)).fetchone():
                 raise L.NotFound("supplier not found")
+            rate_from = "one-off"
+            if r is None:
+                r = _rate_when_assigned(conn, o["id"], supplier_id)
+                rate_from = "agreed" if r is None else "assignment"
             r, cost = _lock_supplier(conn, o, supplier_id, r, now)
             assigned_now = {"assigned_with_payout": True, "rate": str(r),
-                            "supplier_cost": cost}
+                            "rate_from": rate_from, "supplier_cost": cost}
             o = _get_order(conn, o["id"])
         elif r is not None:
             raise L.LedgerError("this order's supplier rate was set when it was assigned")
@@ -630,7 +648,8 @@ def unassign_supplier(conn, order_id, *, admin_id, reason, now=None):
             "UPDATE orders SET status = 'placed', supplier_id = NULL, supplier_rate = NULL, "
             "supplier_cost = NULL, assigned_at = NULL WHERE id = ?", (order_id,))
         L._log(conn, admin_id, "unassign_supplier", order_id,
-               supplier_id=o["supplier_id"], reason=reason)
+               supplier_id=o["supplier_id"], rate=o["supplier_rate"],
+               supplier_cost=o["supplier_cost"], reason=reason)
 
 
 def cancel_order(conn, order_id, *, admin_id, reason, now=None):

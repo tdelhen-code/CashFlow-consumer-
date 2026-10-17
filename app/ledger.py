@@ -850,19 +850,45 @@ def account_statement(conn, code, limit=50):
     return _statement(conn, row["id"], limit)
 
 
-def admin_log(conn, *, action=None, target=None, limit=50):
+# What each admin log action's target is: user 2, order 2 and supplier 2 are
+# all target '2', so admin_log(kind=) tells them apart.
+LOG_TARGET_KIND = {
+    **dict.fromkeys(("create_user", "set_whatsapp", "block_user", "unblock_user",
+                     "deactivate_user", "reactivate_user", "unlock_login",
+                     "issue_setup_code", "setup_code_used"), "user"),
+    **dict.fromkeys(("assign_supplier", "unassign_supplier", "cancel_order",
+                     "mark_paid"), "order"),
+    **dict.fromkeys(("deposit", "payroll", "capital", "move_money", "withdraw_cash",
+                     "reverse", "pay_supplier"), "transaction"),
+    **dict.fromkeys(("add_supplier", "set_supplier_price", "set_supplier_active"),
+                    "supplier"),
+    **dict.fromkeys(("add_till", "add_currency", "set_currency_active", "set_price"),
+                    "code"),
+}
+
+
+def admin_log(conn, *, action=None, target=None, kind=None, limit=50):
     """The admin log, newest first: who did what, to what, and the details
     (reasons, setup codes issued and used, unassigned suppliers...). Optionally
-    only one action (e.g. 'issue_setup_code') or one target (a user, order or
-    transaction id, a till or currency code)."""
+    only one action (e.g. 'issue_setup_code'), one kind of target (user, order,
+    transaction, supplier or code: a till or currency code) and one target.
+    A target alone matches that id of every kind; each row says its
+    target_kind."""
     sql, args = "SELECT id, at, admin_id, action, target, details FROM admin_log", []
-    where = [(col, value) for col, value in (("action", action), ("target", target))
-             if value is not None]
+    where = [(f"{col} = ?", [str(value)]) for col, value in
+             (("action", action), ("target", target)) if value is not None]
+    if kind is not None:
+        actions = [a for a, k in LOG_TARGET_KIND.items() if k == kind]
+        if not actions:
+            raise LedgerError("kind must be one of: " + ", ".join(
+                sorted(set(LOG_TARGET_KIND.values()))))
+        where.append((f"action IN ({', '.join('?' * len(actions))})", actions))
     if where:
-        sql += " WHERE " + " AND ".join(f"{col} = ?" for col, _ in where)
-        args += [str(value) for _, value in where]
+        sql += " WHERE " + " AND ".join(clause for clause, _ in where)
+        args += [value for _, values in where for value in values]
     rows = conn.execute(sql + " ORDER BY id DESC LIMIT ?", args + [limit]).fetchall()
-    return [dict(r, details=json.loads(r["details"]) if r["details"] else {})
+    return [dict(r, target_kind=LOG_TARGET_KIND.get(r["action"]),
+                 details=json.loads(r["details"]) if r["details"] else {})
             for r in rows]
 
 

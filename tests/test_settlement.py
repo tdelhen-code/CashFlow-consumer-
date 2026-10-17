@@ -149,6 +149,33 @@ class SettlementTests(unittest.TestCase):
                         rate="7.00")
         self.assertHealthy()
 
+    def test_a_payout_recorded_after_an_unassign_keeps_the_rate_it_was_made_at(self):
+        # Cairo held the order at 7.80 and paid it then; its price went up
+        # before the proof arrived. Without a one-off rate, Cairo is owed what
+        # it was assigned at; a supplier that never held the order, its rate now.
+        o, never = self.order("100"), self.order("10")
+        O.assign_supplier(self.db, o["id"], self.cairo, admin_id=self.admin)
+        O.unassign_supplier(self.db, o["id"], admin_id=self.admin,
+                            reason="Cairo says it has not paid")
+        O.assign_supplier(self.db, o["id"], self.tunis, admin_id=self.admin)
+        O.unassign_supplier(self.db, o["id"], admin_id=self.admin,
+                            reason="Tunis cannot reach the bank")
+        O.set_supplier_price(self.db, self.cairo, "USD", "7.95", admin_id=self.admin)
+        O.mark_paid(self.db, o["receipt_code"], "CAIRO-PROOF", admin_id=self.admin,
+                    supplier_id=self.cairo)
+        paid = O.find_by_receipt(self.db, o["receipt_code"])
+        self.assertEqual((paid["supplier_rate"], paid["supplier_cost"]), ("7.80", lyd("780")))
+        self.assertEqual(O.supplier_balance(self.db, self.cairo), lyd("780"))
+        O.mark_paid(self.db, never["receipt_code"], "CAIRO-2", admin_id=self.admin,
+                    supplier_id=self.cairo)
+        self.assertEqual(O.find_by_receipt(self.db, never["receipt_code"])["supplier_cost"],
+                         lyd("79.5"))
+        rates = [(d["rate"], d["rate_from"]) for d in (json.loads(r["details"]) for r in
+                 self.db.execute("SELECT details FROM admin_log WHERE action = 'mark_paid' "
+                                 "ORDER BY id"))]
+        self.assertEqual(rates, [("7.80", "assignment"), ("7.95", "agreed")])
+        self.assertHealthy()
+
     def test_a_supplier_switched_off_gets_no_new_orders_but_its_open_ones_settle(self):
         paid, taken_back, new = self.order("100"), self.order("10"), self.order("20")
         for o in (paid, taken_back):

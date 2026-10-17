@@ -664,6 +664,9 @@ class WebTests(unittest.TestCase):
             (anon, "/api/setup-password", {"phone": "0911111111", "code": 23456789,
                                            "password": "new-wallet-99"}, 400),
             (admin, f"/api/admin/users/{ali_id}/block", {"reason": 5}, 400),
+            (admin, f"/api/admin/users/{ali_id}/block", {"reason": "\u061c"}, 400),
+            (admin, f"/api/admin/users/{ali_id}/block", {"reason": " \u061c\u200f "}, 400),
+            (admin, "/api/admin/users", {"name": "\u061c", "phone": "0944444444"}, 400),
             (admin, "/api/admin/users", {"name": 5, "phone": "0944444444"}, 400),
             (admin, "/api/admin/users", {"name": "Omar", "phone": "0944444444",
                                          "whatsapp": 201001234567}, 400),
@@ -694,6 +697,9 @@ class WebTests(unittest.TestCase):
             self.assertNotEqual(answer["type"], "internal")
         status, answer = admin.get("/api/admin/margin?until=9999-12-31T23:59:59-01:00")
         self.assertEqual(status, 400, answer)
+        users = admin.get("/api/admin/users")[1]["users"]
+        self.assertFalse(next(u for u in users if u["id"] == ali_id)["blocked"])
+        self.assertNotIn("0944444444", [u["phone"] for u in users])
 
         # Text that is not valid Unicode (a lone surrogate) and JSON nested
         # too deep for the parser are refused like any other bad body.
@@ -1754,11 +1760,35 @@ class WebTests(unittest.TestCase):
         status, log = self.admin.get(
             f"/api/admin/log?action=unassign_supplier&target={order['id']}")
         self.assertEqual([(e["admin_id"], e["details"]) for e in log["entries"]], [
-            (1, {"supplier_id": 1, "reason": "Cairo has not paid; Tunis is cheaper"})])
-        status, log = self.admin.get(f"/api/admin/log?target={ali_id}&limit=3")
+            (1, {"supplier_id": 1, "rate": "7.80", "supplier_cost": 78000,
+                 "reason": "Cairo has not paid; Tunis is cheaper"})])
+        status, log = self.admin.get(f"/api/admin/log?kind=user&target={ali_id}&limit=3")
         self.assertEqual([e["action"] for e in log["entries"]],
                          ["issue_setup_code", "setup_code_used", "issue_setup_code"])
         self.assertTrue(all(e["at"] for e in log["entries"]))
+
+        # User 2, order 2, transaction 2 and supplier 2 are all target 2:
+        # ?kind= keeps one, and every row says which kind it is.
+        self.assertEqual(self.admin.post("/api/admin/suppliers", {
+            "name": "Tunis agent", "country": "TN"})[1]["id"], 2)
+        self.assertEqual(ali_id, 2)
+        status, log = self.admin.get("/api/admin/log?target=2&limit=200")
+        kinds = {e["target_kind"] for e in log["entries"]}
+        self.assertLessEqual({"user", "supplier"}, kinds)
+        for kind in ("user", "supplier", "transaction", "order", "code"):
+            status, log = self.admin.get(f"/api/admin/log?kind={kind}&target=2&limit=200")
+            self.assertEqual(status, 200, log)
+            self.assertEqual({e["target_kind"] for e in log["entries"]} - {kind}, set())
+        self.assertEqual(self.admin.get("/api/admin/log?kind=till")[0], 400)
+
+    def test_every_logged_action_has_a_target_kind(self):
+        source = ""
+        for module in (L, O, A):
+            with open(module.__file__, encoding="utf-8") as f:
+                source += f.read()
+        actions = set(re.findall(r'_log\(conn, [^,]+, "(\w+)"', source))
+        self.assertGreater(len(actions), 20)
+        self.assertEqual(actions - set(L.LOG_TARGET_KIND), set())
 
     # --- the README describes what the app does ---
     def test_readme_names_every_route_and_error_status(self):
