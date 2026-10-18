@@ -3,3 +3,8 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+*.db.gz
+*.db.lock
+*.before-restore-*
+deploy/.env
+deploy/backups/

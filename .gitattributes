@@ -1,0 +1,5 @@
+# Files the container runs keep Unix line endings, also in a checkout on Windows.
+*.sh text eol=lf
+deploy/manage text eol=lf
+deploy/Caddyfile text eol=lf
+Dockerfile text eol=lf

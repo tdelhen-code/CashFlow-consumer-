@@ -1,0 +1,6 @@
+# Only the production server (python3 -m app.serve) needs this: the app itself
+# and its tests use the standard library only.
+#   pip install --require-hashes -r requirements.txt
+waitress==3.0.2 \
+    --hash=sha256:c56d67fd6e87c2ee598b76abdd4e96cfad1f24cacdea5078d382b1f9d7b5ed2e \
+    --hash=sha256:682aaaf2af0c44ada4abfb70ded36393f0e307f4ab9456a215ce0020baefc31f

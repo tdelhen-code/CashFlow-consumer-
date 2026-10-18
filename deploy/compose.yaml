@@ -1,0 +1,72 @@
+# The LYD wallet: the app, Caddy in front of it for HTTPS, and (profile
+# "tunnel") a Cloudflare Tunnel for a computer without a public address.
+# Settings come from .env next to this file (copy .env.example).
+#   docker compose up -d --build                    on a server with a domain
+#   docker compose --profile tunnel up -d --build   behind the tunnel
+name: lyd-wallet
+
+services:
+  app:
+    build: ..
+    image: lyd-wallet
+    restart: unless-stopped
+    # Only Caddy (its fixed address below) may say who the client is.
+    command: ["python", "-m", "app.serve", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy", "172.29.83.10"]
+    environment:
+      WALLET_UID: ${WALLET_UID:-10001}
+      WALLET_GID: ${WALLET_GID:-10001}
+      WALLET_PING_URL: ${WALLET_PING_URL:-}
+    volumes:
+      # The database stays in a Docker volume: SQLite needs a real disk, which
+      # a folder shared from Windows or macOS is not.
+      - wallet-data:/data
+      - ${BACKUP_DIR:-./backups}:/backups
+    networks: [wallet]
+    stop_grace_period: 1m       # lets a backup under way finish
+    # No ports: only Caddy reaches the app.
+
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "${PUBLISH_IP:-0.0.0.0}:80:80"
+      - "${PUBLISH_IP:-0.0.0.0}:443:443"
+      - "${PUBLISH_IP:-0.0.0.0}:443:443/udp"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data            # its certificates
+      - caddy-config:/config
+    networks:
+      wallet:
+        ipv4_address: 172.29.83.10
+
+  cloudflared:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:2026.9.3
+    restart: unless-stopped
+    depends_on: [caddy]
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    networks:
+      wallet:
+        ipv4_address: 172.29.83.11  # the one address Caddy takes Cf-Connecting-IP from
+
+volumes:
+  wallet-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  wallet:
+    ipam:
+      config:
+        - subnet: 172.29.83.0/24
+          # Containers without a fixed address (the app, and one-off
+          # `docker compose run` ones) get one from here, so none can take
+          # Caddy's or the tunnel's.
+          ip_range: 172.29.83.128/25

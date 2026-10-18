@@ -19,8 +19,12 @@ the backups on a timer.
 - --ping-url: an address called after each run (a healthchecks.io check, for
   example), with /fail added when something went wrong. Such a service tells
   a person when it hears /fail, and also when it stops hearing anything.
+- In a container the settings can come from the environment instead:
+  WALLET_DB, WALLET_BACKUP_DIR, WALLET_COPY_TO (folders separated by
+  os.pathsep) and WALLET_PING_URL; a flag given on the command line wins.
 """
 import argparse
+import os
 import select
 import signal
 import sqlite3
@@ -212,29 +216,38 @@ def _ping_url(text):
     return text
 
 
+def _env(name):
+    return os.environ.get(name) or None
+
+
 def _parser():
     parser = argparse.ArgumentParser(prog="python3 -m app.serve",
                                      description="LYD wallet production server")
-    parser.add_argument("--db", required=True, help="the database file")
+    parser.add_argument("--db", default=_env("WALLET_DB"), required=not _env("WALLET_DB"),
+                        help="the database file (or WALLET_DB)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--proxy", default="127.0.0.1",
                         help="address of the HTTPS proxy in front (empty: none)")
     parser.add_argument("--threads", type=int, default=THREADS)
-    parser.add_argument("--backup-dir", help="folder for the backups (none: no backups)")
-    parser.add_argument("--copy-to", action="append", default=[], metavar="FOLDER",
-                        help="also copy each backup here (can be given more than once)")
+    parser.add_argument("--backup-dir", default=_env("WALLET_BACKUP_DIR"),
+                        help="folder for the backups (or WALLET_BACKUP_DIR; none: no backups)")
+    parser.add_argument("--copy-to", action="append", metavar="FOLDER",
+                        help="also copy each backup here (can be given more than once; "
+                             "or WALLET_COPY_TO)")
     parser.add_argument("--backup-every", type=_minutes, default=3600, metavar="MINUTES",
                         help="minutes between backups (60)")
     parser.add_argument("--check-every", type=_minutes, default=3600, metavar="MINUTES",
                         help="minutes between ledger checks (60)")
-    parser.add_argument("--ping-url", type=_ping_url,
-                        help="address to call after each check and backup")
+    parser.add_argument("--ping-url", type=_ping_url, default=_env("WALLET_PING_URL"),
+                        help="address to call after each check and backup (or WALLET_PING_URL)")
     return parser
 
 
 def main(argv=None):
     args = _parser().parse_args(argv)
+    if args.copy_to is None:
+        args.copy_to = [f for f in (_env("WALLET_COPY_TO") or "").split(os.pathsep) if f]
     if args.copy_to and not args.backup_dir:
         print("error: --copy-to needs --backup-dir", file=sys.stderr)
         return 1
@@ -253,7 +266,8 @@ def main(argv=None):
                 f"(database {args.db}; proxy {args.proxy or 'none'}; "
                 f"backups {args.backup_dir or 'off'})")
             if not _has_admin(args.db):
-                log("no admin yet: create one with python3 -m app.manage first-admin")
+                log("no admin yet: create the first one with python3 -m app.manage "
+                    "first-admin (with Docker: docker compose exec app manage first-admin)")
             try:
                 server.run()            # until SIGTERM or Ctrl+C
             except KeyboardInterrupt:

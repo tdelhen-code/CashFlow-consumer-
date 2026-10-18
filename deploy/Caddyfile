@@ -1,0 +1,23 @@
+# Caddy in front of the wallet: HTTPS (a certificate for SITE_ADDRESS, made
+# and renewed by itself), security headers, and exactly one X-Forwarded-For
+# for the app: the real client's address.
+{
+	servers {
+		# Only the tunnel container (compose.yaml) may say who the client is,
+		# with Cloudflare's Cf-Connecting-IP; from anyone else it is ignored
+		# and the client is whoever connected.
+		trusted_proxies static 172.29.83.11/32
+		client_ip_headers Cf-Connecting-IP
+	}
+}
+
+{$SITE_ADDRESS} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy app:8000 {
+		header_up X-Forwarded-For {client_ip}
+		header_down -Server
+	}
+}

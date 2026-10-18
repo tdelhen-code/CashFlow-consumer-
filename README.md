@@ -154,18 +154,20 @@ Login (`app/auth.py`) and what the web app calls (`app/api.py`):
   supplier or margin details). Admin screens get the admin's id with
   `api.admin_id(conn, token)`.
 
-Set up a new database with the first admin:
+Set up a new database with the first admin (it asks for the password):
 
-    from app import auth
-    conn = auth.connect("wallet.db")
-    auth.create_first_admin(conn, "Name", "091 000 0000", "a strong password")
+    python3 -m app.manage first-admin --db wallet.db --name "Name" --phone "091 000 0000"
 
-Needs Python 3.10+ only (standard library). Run the tests from this folder:
+Needs Python 3.10+ only (standard library; the production server also needs
+waitress, see below). Run the tests from this folder:
 
     python3 -m unittest
 
-The schema assumes a fresh database: there are no migrations yet, so a database
-file made by an earlier version must be recreated.
+The database keeps the version of its tables (`ledger.SCHEMA_VERSION`, in
+SQLite's `user_version`): a new one is stamped with it, one from an earlier
+version is upgraded when it is opened (`ledger.MIGRATIONS`, all in one write,
+or not at all), and one from a newer version of the app is refused
+(`DatabaseTooNew`) without changing it.
 
 ## Web API (`app/web.py`)
 
@@ -178,7 +180,8 @@ connection from one request to the next, and lets go of a client that sends
 nothing for 30 seconds or whose request hasn't fully arrived within 30
 seconds. It is for local testing only: don't make it reachable by others.
 
-In production, serve `make_app("/path/wallet.db", trust_proxy=True)` with a WSGI
+In production, run `python3 -m app.serve` (see "Running it for real" below).
+To serve it some other way, serve `make_app("/path/wallet.db", trust_proxy=True)` with a WSGI
 server (waitress, gunicorn) behind HTTPS (nginx, Caddy) that sets
 `X-Forwarded-For`; without `trust_proxy` every client looks like the proxy, so
 they all share one login limit. Waitress drops that header unless it is told to
@@ -263,9 +266,71 @@ missing key (where required) or a blank one is a 400.
 | Everyone | `GET /api/ping` (no login: `{"ok": true}` if the server and its database answer, for health checks); `POST /api/login` (`{phone, password}`), `/api/setup-password` (`{phone, code, password}`), `/api/logout` (this session), `/api/logout-everywhere` (every session of this user), `/api/change-password` (`{old_password, new_password}`; ends the other sessions) |
 | Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id}`) |
 | Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&kind=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; all filters optional; `kind` is `user`, `order`, `transaction`, `supplier` or `code`); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `ar` (default), `en` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
-| Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` |
+| Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` (the checks' `problems`, what is owed and held, and `maintenance`: see below) |
 | Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/active` (`{active: true/false, reason}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?, rate?}`; an order without a supplier needs `supplier_id`, and `rate` is a one-off rate for it); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
+
+## Running it for real
+
+[docs/HOSTING.md](docs/HOSTING.md) is the owner's guide (where to host it,
+setting it up, backups, restoring), and [deploy/](deploy/README.md) has it all
+set up with Docker: this app, Caddy for HTTPS, and a Cloudflare Tunnel for a
+computer without a public address.
+
+The production server (`app/serve.py`, needs `pip install --require-hashes -r
+requirements.txt`):
+
+    python3 -m app.serve --db wallet.db --backup-dir backups [--proxy 127.0.0.1]
+        [--copy-to FOLDER] [--backup-every 60] [--check-every 60] [--ping-url URL]
+
+- the app on waitress, in one process, on 127.0.0.1:8000 unless `--host` and
+  `--port` say otherwise. It holds an OS lock on `<db>.lock` while it runs: a
+  second server on the same database is refused (the limits are kept per
+  process), and so is a restore;
+- `--proxy` is the address of the HTTPS proxy in front (127.0.0.1 unless
+  given; `""` for none). Only it may say who the client is: waitress takes
+  the client from its `X-Forwarded-For` (the last entry) and drops the header
+  when anyone else sends it, so the app itself doesn't read the header here;
+- every `--check-every` minutes (60) the ledger and order checks run, and every
+  `--backup-every` minutes (60, with `--backup-dir`) a backup is made, copied
+  into each `--copy-to` folder and old ones are pruned; the first ones 10
+  seconds after the start. A failure is logged (`PROBLEM: ...` lines on stderr)
+  and tried again next time; it never stops the server;
+- `GET /api/admin/health` then has `maintenance`: `last_check` (`at`, `ok`,
+  `problems` found, `error`), `last_backup` (`at`, `ok`, `name`, `error`,
+  `problems`, `copy_errors`), `last_good_backup_at`, `backups_on` and
+  `backup_overdue` (no sound backup for more than twice the interval plus 10
+  minutes). It is `null` when the app runs without them (the bundled server);
+- `--ping-url` (such as a healthchecks.io check) is called after each run,
+  with `/fail` added when the check or the backup went wrong or a backup is
+  overdue;
+- SIGTERM or Ctrl+C stops it cleanly. In a container the settings can come
+  from `WALLET_DB`, `WALLET_BACKUP_DIR`, `WALLET_COPY_TO` and `WALLET_PING_URL`.
+
+Backups (`app/backup.py`, from the command line with `app.manage`):
+
+    python3 -m app.manage backup --db wallet.db --dir backups [--copy-to FOLDER]
+    python3 -m app.manage list --dir backups
+    python3 -m app.manage check --db wallet.db
+    python3 -m app.manage check-backup backups/wallet-20261018T050000Z.db.gz
+    python3 -m app.manage restore backups/wallet-20261018T050000Z.db.gz --db wallet.db
+
+- a backup is a consistent copy made with SQLite's backup API while the app
+  runs, as one gzip file named for the time in UTC
+  (`wallet-20261018T050000Z.db.gz`, `-2` added for a second one in the same
+  second). It is kept only if it is sound (integrity and foreign key checks);
+  one whose ledger or order checks find problems is kept and reported (exit
+  status 2), as it shows how things were. Never copy the `.db` file by hand
+  while the app runs;
+- old backups are pruned only after a good one: every backup of the last 48
+  hours, the newest of each UTC day for 30 days and of each month for 12
+  months, and always the newest; only files named like backups are touched;
+- `restore` checks the backup first, refuses one from a newer version of the
+  app, and is refused while a server holds the database's lock. The database
+  it replaces is moved aside with its `-wal` and `-shm` files, as
+  `<db>.before-restore-<time>`, never deleted;
+- `GET /api/ping` (no login) answers `{"ok": true}` when the server and its
+  database answer, for the proxy's and the container's health checks.
 
 Not built yet: suppliers paid in foreign currency instead of LYD, approvals
 (such as a second admin approving a reset of an admin's account), screens
-(Arabic, English, French), hosting and backups.
+(Arabic, English, French).

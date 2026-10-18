@@ -10,9 +10,13 @@
 Exit status: 0 done; 1 failed (a plain message on stderr); 2 for backup and
 check when the ledger check found problems (a backup is still made: it shows
 how things were).
+
+--db and --dir can be left out where WALLET_DB and WALLET_BACKUP_DIR are set
+(as in the container: docker compose exec app manage backup).
 """
 import argparse
 import getpass
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -117,31 +121,46 @@ def restore(args):
     return OK
 
 
+def _env(name):
+    return os.environ.get(name) or None
+
+
+def _db(p):
+    p.add_argument("--db", default=_env("WALLET_DB"), required=not _env("WALLET_DB"),
+                   help="the database file (or WALLET_DB)")
+
+
+def _dir(p):
+    p.add_argument("--dir", default=_env("WALLET_BACKUP_DIR"),
+                   required=not _env("WALLET_BACKUP_DIR"),
+                   help="the backups folder (or WALLET_BACKUP_DIR)")
+
+
 def _parser():
     parser = argparse.ArgumentParser(prog="python3 -m app.manage",
                                      description="Look after the LYD wallet database.")
     commands = parser.add_subparsers(dest="command", required=True)
 
     p = commands.add_parser("first-admin", help="create the first admin (asks for the password)")
-    p.add_argument("--db", required=True)
+    _db(p)
     p.add_argument("--name", required=True)
     p.add_argument("--phone", required=True)
     p.add_argument("--language", choices=L.LANGUAGES, default="ar")
     p.set_defaults(func=first_admin)
 
     p = commands.add_parser("backup", help="back up the database now")
-    p.add_argument("--db", required=True)
-    p.add_argument("--dir", required=True, help="folder for the backups")
+    _db(p)
+    _dir(p)
     p.add_argument("--copy-to", action="append", default=[], metavar="FOLDER",
                    help="also copy the backup here (can be given more than once)")
     p.set_defaults(func=backup)
 
     p = commands.add_parser("list", help="list the backups in a folder, newest first")
-    p.add_argument("--dir", required=True)
+    _dir(p)
     p.set_defaults(func=list_backups)
 
     p = commands.add_parser("check", help="check the database (sound, ledger and orders)")
-    p.add_argument("--db", required=True)
+    _db(p)
     p.set_defaults(func=check)
 
     p = commands.add_parser("check-backup", help="check a backup file without restoring it")
@@ -151,7 +170,7 @@ def _parser():
     p = commands.add_parser("restore", help="put a backup in place of the database "
                                             "(stop the server first)")
     p.add_argument("file")
-    p.add_argument("--db", required=True)
+    _db(p)
     p.add_argument("--yes", action="store_true", help="don't ask to confirm")
     p.set_defaults(func=restore)
     return parser
