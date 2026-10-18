@@ -1,12 +1,14 @@
 """JSON web API over HTTP, as a WSGI app (standard library only).
 
 Run locally:      python3 -m app.web --db wallet.db --port 8000 --insecure-cookies
-In production:    serve `app.web:make_app("wallet.db", trust_proxy=True)` with a
-                  WSGI server such as waitress or gunicorn, in one process, behind
-                  HTTPS (nginx, Caddy, ...) that sets X-Forwarded-For. Waitress
-                  drops that header unless told to trust the proxy:
-                  trusted_proxy="127.0.0.1" (the proxy's address) and
-                  trusted_proxy_headers="x-forwarded-for".
+In production:    python3 -m app.serve (app/serve.py): this app on waitress in
+                  one process, behind HTTPS (Caddy), with the hourly check and
+                  backups; deploy/ sets it all up with Docker. Served another
+                  way: `make_app("wallet.db", trust_proxy=True)` with a WSGI
+                  server in one process, behind HTTPS that sets
+                  X-Forwarded-For. Waitress drops that header unless told to
+                  trust the proxy: trusted_proxy="127.0.0.1" (the proxy's
+                  address) and trusted_proxy_headers="x-forwarded-for".
 
 Rules every request follows:
 - Requests and responses are JSON. POST bodies must be sent as
@@ -132,9 +134,10 @@ class RateLimiter:
 
 def client_key(ip):
     """What login tries are counted by: the client's address, but for IPv6 its
-    /64 (one home or phone network), where anyone can pick a new address."""
+    /64 (one home or phone network), where anyone can pick a new address.
+    Waitress gives an IPv6 address from the proxy in brackets: [2001:db8::1]."""
     try:
-        address = ipaddress.ip_address(ip)
+        address = ipaddress.ip_address(ip.removeprefix("[").removesuffix("]"))
     except ValueError:
         return ip
     if address.version == 6 and address.ipv4_mapped:
@@ -340,6 +343,14 @@ def _login_try(app, req, account, attempt):
             app.login_limiter.forgive(address, tried)
         if held is not None and not right:
             app.account_limiter.forgive(account, held)
+
+
+@route("GET", "/api/ping")
+def ping(app, conn, req):
+    """For the proxy's and the container's health checks: no login needed, and
+    it tells nothing but that the server answers and its database opens."""
+    conn.execute("SELECT 1 FROM accounts LIMIT 1").fetchone()
+    return {"ok": True}
 
 
 @route("POST", "/api/login")
@@ -571,7 +582,9 @@ def admin_health(app, conn, req):
                 "holdings": {r["code"]: _money(L.holding_amount(conn, r["code"]))
                              for r in holdings},
                 "margin": _money(L.account_balance(conn, "SYS_MARGIN")),
-                "fees": _money(L.account_balance(conn, "SYS_FEES"))}
+                "fees": _money(L.account_balance(conn, "SYS_FEES")),
+                # the production server's hourly check and backups (app.serve)
+                "maintenance": app.maintenance.status() if app.maintenance else None}
 
 
 @route("POST", "/api/admin/reconcile")
@@ -748,6 +761,7 @@ class App:
         self.worker_limiter = worker_limiter or RateLimiter(
             WORKER_REQUESTS_PER_MINUTE, 60, message="too many requests; wait a minute")
         self.warned_no_forwarded_for = False
+        self.maintenance = None         # app.serve's Maintenance, when it runs one
         self.local = threading.local()
         A.connect(db_path).close()      # create the tables once, up front
 

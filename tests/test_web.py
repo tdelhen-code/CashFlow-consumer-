@@ -1806,6 +1806,22 @@ class WebTests(unittest.TestCase):
         for status in sorted(statuses):
             self.assertIn(str(status), errors, f"README Errors: {status} is not described")
 
+    # --- health checks ---
+    def test_ping_needs_no_login_and_tells_nothing_else(self):
+        status, body = Client(self.app, ip="10.0.9.9").get("/api/ping")
+        self.assertEqual((status, body), (200, {"ok": True}))
+        self.assertEqual(Client(self.app).post("/api/ping")[0], 405)
+
+    def test_health_shows_the_maintenance_only_when_the_server_runs_it(self):
+        self.assertIsNone(self.admin.get("/api/admin/health")[1]["maintenance"])
+
+        class Running:
+            def status(self):
+                return {"backup_overdue": False}
+        self.app.maintenance = Running()
+        self.assertEqual(self.admin.get("/api/admin/health")[1]["maintenance"],
+                         {"backup_overdue": False})
+
 
 if __name__ == "__main__":
     unittest.main()

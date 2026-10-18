@@ -194,8 +194,15 @@ def _backups(folder):
 
 def list_backups(backup_dir):
     """The backups in a folder, newest first: {path, name, created_at, size}."""
-    return [{"path": str(path), "name": path.name, "created_at": _iso(when),
-             "size": path.stat().st_size} for when, _, _, path in _backups(backup_dir)]
+    found = []
+    for when, _, _, path in _backups(backup_dir):
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:   # pruned meanwhile
+            continue
+        found.append({"path": str(path), "name": path.name, "created_at": _iso(when),
+                      "size": size})
+    return found
 
 
 def _keep(backups, now):
