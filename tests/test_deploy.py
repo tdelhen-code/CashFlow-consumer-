@@ -251,7 +251,7 @@ class GuideTests(unittest.TestCase):
 
     def test_without_docker_waitress_goes_in_a_virtual_environment(self):
         # The system's pip refuses on Ubuntu 24.04 (PEP 668).
-        for name in ("docs/HOSTING.md", "deploy/README.md", "README.md"):
+        for name in ("docs/HOSTING.md", "deploy/README.md", "README.md", "requirements.txt"):
             for line in read(name).splitlines():
                 if "pip install" in line:
                     self.assertIn(".venv/bin/pip install", line, name)

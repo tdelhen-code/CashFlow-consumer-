@@ -188,6 +188,7 @@ class MaintenanceTests(Folder):
 
     def test_runs_the_check_and_backups_on_its_timer(self):
         make_wallet(self.db)[0].close()
+        (self.dir / "usb").mkdir()          # a copy-to folder is never made for it
         maintenance = S.Maintenance(str(self.db), backup_dir=str(self.backups),
                                     copy_to=[str(self.dir / "usb")], check_every=0.05,
                                     backup_every=0.05, first_run=0, log=self.logged.append)
@@ -310,6 +311,20 @@ class MaintenanceTests(Folder):
         status = maintenance.status()
         self.assertEqual((status["backups_on"], status["last_backup"], status["backup_overdue"]),
                          (False, None, False))
+
+    def test_a_copy_to_folder_that_is_not_there(self):
+        make_wallet(self.db)[0].close()
+        usb = self.dir / "media" / "usb"            # the drive isn't plugged in
+        maintenance = S.Maintenance(str(self.db), backup_dir=str(self.backups),
+                                    copy_to=[str(usb)], now=lambda: NOW, log=self.logged.append)
+        maintenance.backup()
+        status = maintenance.status()
+        error = f"{usb} is not there (is the drive plugged in?)"
+        self.assertFalse(status["last_backup"]["ok"])
+        self.assertEqual(status["last_backup"]["copy_errors"], [error])
+        self.assertEqual(status["last_good_backup_at"], NOW.isoformat())   # the file is sound
+        self.assertIn(f"PROBLEM: copying the backup failed: {error}", self.logged)
+        self.assertFalse(usb.parent.exists())
 
     def test_a_backup_whose_old_ones_could_not_be_removed(self):
         make_wallet(self.db)[0].close()

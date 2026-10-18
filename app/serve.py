@@ -146,8 +146,8 @@ class Maintenance:
                                 "prune_errors": prune_errors}
         self.log(f"backup: {result['name']} ({result['size']} bytes)"
                  + "".join(f", copied to {c}" for c in result["copies"]))
-        for error in copy_errors:
-            self.log(f"PROBLEM: the backup could not be copied to {error}")
+        for error in copy_errors:       # each one names its folder
+            self.log(f"PROBLEM: copying the backup failed: {error}")
         for error in prune_errors:
             self.log(f"PROBLEM: {error}")
         if problems:
