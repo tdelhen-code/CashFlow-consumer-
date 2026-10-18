@@ -1,0 +1,7 @@
+# Only what the image needs: app/, requirements.txt and deploy/entrypoint.sh.
+*
+!app/
+!requirements.txt
+!deploy/entrypoint.sh
+!deploy/manage
+app/__pycache__/

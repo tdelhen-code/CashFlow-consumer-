@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.db.gz
+*.db.lock
+*.before-restore-*
+*.partial
+deploy/.env
+deploy/backups/
+backups/
+.venv/

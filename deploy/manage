@@ -1,0 +1,5 @@
+#!/bin/sh
+# `manage ...` in the container is python -m app.manage, as the wallet user
+# (docker compose exec runs as root otherwise). The database and backup
+# folder come from WALLET_DB and WALLET_BACKUP_DIR.
+exec wallet-entrypoint python -m app.manage "$@"
