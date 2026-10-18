@@ -53,6 +53,10 @@ ROLES = ("customer", "admin")
 LANGUAGES = ("ar", "en", "fr")
 MOBILE_PREFIXES = ("91", "92", "93", "94", "95")   # Libyan mobile networks
 MAX_IDEMPOTENCY_KEY = 200
+SCHEMA_VERSION = 1      # kept in the database file (PRAGMA user_version)
+# MIGRATIONS[n](conn) upgrades a database from version n-1 to n, any table
+# (ledger, orders or login). connect() runs the ones a database needs.
+MIGRATIONS = {}
 
 
 class LedgerError(Exception):
@@ -92,6 +96,11 @@ class Conflict(LedgerError):
     supplier or phone number, a payroll batch that was already posted, a quote
     already used for another beneficiary, or an order that is (now) with a
     supplier, or with a different one."""
+
+
+class DatabaseTooNew(LedgerError):
+    """The database was made by a newer version of the app, whose tables this
+    version doesn't know: it isn't opened, so nothing in it is changed."""
 
 
 SCHEMA = """
@@ -293,12 +302,48 @@ def connect(path=":memory:"):
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = FULL")
+    try:
+        _upgrade(conn)
+    except BaseException:
+        conn.close()
+        raise
     conn.executescript(SCHEMA)
     conn.execute("INSERT OR IGNORE INTO accounts(kind, code) VALUES ('holding', 'BANK')")
     for code in SYSTEM_ACCOUNTS:
         conn.execute(
             "INSERT OR IGNORE INTO accounts(kind, code) VALUES ('system', ?)", (code,))
     return conn
+
+
+def schema_version(conn):
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _upgrade(conn):
+    """Bring the database to SCHEMA_VERSION before the tables are used: a new
+    one is stamped with it, an older one gets the migrations it is missing, in
+    one write. One from a newer version of the app is refused untouched."""
+    def check(version):
+        if version > SCHEMA_VERSION:
+            raise DatabaseTooNew(
+                f"this database is from a newer version of the app (schema "
+                f"{version}; this one knows up to {SCHEMA_VERSION}); update the app")
+        return version == SCHEMA_VERSION
+
+    if check(schema_version(conn)):
+        return
+    with _write(conn):      # checked again here: another connection may be at it
+        version = schema_version(conn)
+        if check(version):
+            return
+        if version == 0 and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'"
+                ).fetchone():
+            version = 1     # made before the version was kept: version 1's tables
+        if version:
+            for step in range(version + 1, SCHEMA_VERSION + 1):
+                MIGRATIONS[step](conn)
+        conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
 
 
 @contextmanager
