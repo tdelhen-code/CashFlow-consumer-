@@ -2,7 +2,9 @@ import gzip
 import os
 import shutil
 import sqlite3
+import stat
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +13,11 @@ from unittest import mock
 from app import auth as A
 from app import backup as B
 from app import ledger as L
+
+try:
+    import resource
+except ImportError:     # Windows
+    resource = None
 
 NOW = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)
 
@@ -92,6 +99,50 @@ class SnapshotTests(Folder):
         self.assertEqual([b["name"] for b in B.list_backups(self.backups)],
                          [second["name"], first["name"]])
 
+    def test_two_backups_in_the_same_second_get_a_whole_file_each(self):
+        make_wallet(self.db)[0].close()
+        both_writing = threading.Barrier(2, timeout=10)
+        compress, results, errors = B._compress, [], []
+
+        def compress_together(*args):       # by now each one has chosen its name
+            both_writing.wait()
+            compress(*args)
+
+        def backup():
+            try:
+                results.append(B.snapshot(self.db, self.backups, now=NOW))
+            except Exception as e:
+                errors.append(e)
+        with mock.patch.object(B, "_compress", compress_together):
+            threads = [threading.Thread(target=backup) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(errors, [])
+        made = sorted(r["name"] for r in results)
+        self.assertEqual(made, ["wallet-20261018T120000Z-2.db.gz",
+                                "wallet-20261018T120000Z.db.gz"])
+        self.assertEqual(names(self.backups), made)      # no unfinished file left
+        for r in results:
+            self.assertTrue(B.check_file(r["path"])["ok"])
+
+    def test_without_hard_links_a_name_taken_meanwhile_is_still_not_replaced(self):
+        # A FAT or exFAT drive can't make hard links: a rename is used instead.
+        make_wallet(self.db)[0].close()
+        first = B.snapshot(self.db, self.backups, now=NOW)
+        stale, free_name = iter([first["name"]]), B._free_name
+
+        def chosen_before_first_was_in_place(*args):
+            return next(stale, None) or free_name(*args)
+        no_links = PermissionError(1, "Operation not permitted")
+        with mock.patch.object(B, "_free_name", chosen_before_first_was_in_place), \
+                mock.patch.object(B.os, "link", side_effect=no_links):
+            second = B.snapshot(self.db, self.backups, now=NOW)
+        self.assertEqual(second["name"], "wallet-20261018T120000Z-2.db.gz")
+        self.assertEqual(names(self.backups), sorted([first["name"], second["name"]]))
+        self.assertTrue(B.check_file(first["path"])["ok"])
+
     def test_a_backup_with_ledger_problems_is_kept_and_reported(self):
         conn = make_wallet(self.db)[0]
         unbalance(conn)
@@ -141,7 +192,9 @@ class PruneTests(Folder):
 
         kept = set(names(self.backups)) - set(others)
         self.assertEqual(len(deleted), len(made) - len(kept))
-        expected = {self.name(NOW - timedelta(hours=6 * i)) for i in range(9)}  # 48 hours
+        # The 48 newest (12 days here), which hold all of the last 48 hours.
+        expected = {self.name(NOW - timedelta(hours=6 * i))
+                    for i in range(B.KEEP_ALL_HOURS)}
         for day in range(30):           # the newest of each day: 18:00 (today 12:00)
             when = (NOW - timedelta(days=day)).replace(hour=18 if day else 12)
             expected.add(self.name(when))
@@ -155,38 +208,66 @@ class PruneTests(Folder):
         for name in others:
             self.assertTrue((self.backups / name).exists())
 
-    def test_always_keeps_the_newest_however_old(self):
-        old = [self.fake(NOW - timedelta(days=800 + i)) for i in range(3)]
+    def test_keeps_every_backup_of_the_last_48_hours_however_many(self):
+        made = [self.fake(NOW - timedelta(minutes=15 * i)) for i in range(4 * 50)]
         B.prune(self.backups, now=NOW)
-        self.assertEqual(names(self.backups), [old[0]])
+        self.assertEqual(set(names(self.backups)), set(made[:4 * 48 + 1]))
+
+    def test_always_keeps_the_48_newest_however_old(self):
+        old = [self.fake(NOW - timedelta(days=800 + i))
+               for i in range(B.KEEP_ALL_HOURS + 3)]
+        B.prune(self.backups, now=NOW)
+        self.assertEqual(names(self.backups), sorted(old[:B.KEEP_ALL_HOURS]))
+
+    def test_one_run_with_the_clock_a_year_ahead_keeps_the_48_newest(self):
+        make_wallet(self.db)[0].close()
+        made = [self.fake(NOW - timedelta(hours=i)) for i in range(60)]
+        ahead = B.run(self.db, self.backups, now=NOW + timedelta(days=365))
+        self.assertEqual(set(names(self.backups)),
+                         {ahead["name"], *made[:B.KEEP_ALL_HOURS - 1]})
 
     def test_each_database_keeps_its_own_newest(self):
-        self.fake(NOW - timedelta(days=900), stem="test")
-        self.fake(NOW - timedelta(days=901), stem="test")
+        for i in range(B.KEEP_ALL_HOURS + 2):
+            self.fake(NOW - timedelta(days=900 + i), stem="test")
         self.fake(NOW)
         B.prune(self.backups, now=NOW)
-        self.assertEqual(len(names(self.backups)), 2)
+        self.assertEqual(len(names(self.backups)), B.KEEP_ALL_HOURS + 1)
 
-    def test_removes_old_unfinished_files_only(self):
+    def test_removes_its_own_old_unfinished_files_only(self):
         self.backups.mkdir()
-        old, fresh = self.backups / "a.db.gz.partial", self.backups / "b.db.gz.partial"
-        old_dir = self.backups / ".tmp-abc"
-        old_dir.mkdir()
-        (old_dir / "wallet.db").write_bytes(b"x")
-        for p in (old, fresh):
-            p.write_bytes(b"x")
+        ours = ["wallet-20261017T110000Z.db.gz.k2j4h5g6.partial",
+                "wallet-20261017T100000Z.db.gz.partial",    # as named before
+                B.TMP_PREFIX + "abc"]
+        others = ["contract.pdf.partial", "notes.db.gz.partial", ".tmp-photos"]
+        fresh = "wallet-20261018T115900Z.db.gz.q8w7e6r5.partial"
         day_ago = NOW.timestamp() - 25 * 3600
-        for p in (old, old_dir):
-            os.utime(p, (day_ago, day_ago))
-        os.utime(fresh, (NOW.timestamp(), NOW.timestamp()))
-        B.prune(self.backups, now=NOW)
-        self.assertEqual(names(self.backups), ["b.db.gz.partial"])
+        for name in ours + others + [fresh]:
+            path = self.backups / name
+            if name.startswith("."):
+                path.mkdir()
+                (path / "wallet.db").write_bytes(b"x")
+            else:
+                path.write_bytes(b"x")
+            when = NOW.timestamp() if name == fresh else day_ago
+            os.utime(path, (when, when))
+        deleted = B.prune(self.backups, now=NOW)
+        self.assertEqual(sorted(deleted), sorted(str(self.backups / n) for n in ours))
+        self.assertEqual(names(self.backups), sorted(others + [fresh]))
 
 
 class RunTests(Folder):
+    def old_backups(self, count):
+        self.backups.mkdir()
+        old = [self.backups / f"wallet-{(NOW - timedelta(days=400 + i)).strftime(B.STAMP)}"
+               ".db.gz" for i in range(count)]
+        for p in old:
+            p.write_bytes(b"")
+        return old
+
     def test_copies_into_each_folder_and_reports_one_that_fails(self):
         make_wallet(self.db)[0].close()
         usb = self.dir / "usb"
+        usb.mkdir()
         blocked = self.dir / "not-a-folder"
         blocked.write_bytes(b"")
         result = B.run(self.db, self.backups, [usb, blocked], now=NOW)
@@ -196,18 +277,56 @@ class RunTests(Folder):
         self.assertEqual((usb / result["name"]).read_bytes(),
                          Path(result["path"]).read_bytes())
 
+    def test_a_copy_folder_that_is_not_there_is_not_made(self):
+        make_wallet(self.db)[0].close()
+        (self.dir / "usb").mkdir()              # the mount point, with no drive in it
+        unplugged = self.dir / "usb" / "wallet"
+        result = B.run(self.db, self.backups, [unplugged], now=NOW)
+        self.assertEqual(result["copies"], [])
+        self.assertEqual(result["copy_errors"],
+                         [f"{unplugged} is not there (is the drive plugged in?)"])
+        self.assertFalse(unplugged.exists())
+
     def test_old_backups_are_pruned_only_after_a_good_one(self):
-        self.backups.mkdir()
-        old = [self.backups / f"wallet-{(NOW - timedelta(days=d)).strftime(B.STAMP)}.db.gz"
-               for d in (400, 401)]
-        for p in old:
-            p.write_bytes(b"")
+        old = self.old_backups(B.KEEP_ALL_HOURS + 1)
         with self.assertRaises(B.BackupError):      # no database: no backup
             B.run(self.db, self.backups, now=NOW)
         self.assertTrue(all(p.exists() for p in old))
         make_wallet(self.db)[0].close()
         result = B.run(self.db, self.backups, now=NOW)
-        self.assertEqual(sorted(result["pruned"]), sorted(str(p) for p in old))
+        self.assertEqual(sorted(result["pruned"]),
+                         sorted(str(p) for p in old[B.KEEP_ALL_HOURS - 1:]))
+
+    def test_a_prune_that_fails_neither_fails_the_backup_nor_stops_the_copies(self):
+        make_wallet(self.db)[0].close()
+        old = self.old_backups(B.KEEP_ALL_HOURS)
+        usb = self.dir / "usb"
+        usb.mkdir()
+        unlink = Path.unlink
+
+        def held_open(path, missing_ok=False):      # as antivirus or a sync tool can
+            if path.parent == self.backups and path.name.endswith(".db.gz"):
+                raise PermissionError(13, "Permission denied", str(path))
+            unlink(path, missing_ok=missing_ok)
+        with mock.patch.object(Path, "unlink", held_open):
+            result = B.run(self.db, self.backups, [usb], now=NOW)
+        self.assertEqual(result["copies"], [str(usb / result["name"])])
+        self.assertEqual(result["copy_errors"], [])
+        self.assertEqual(len(result["prune_errors"]), 1)
+        self.assertTrue(result["prune_errors"][0].startswith(
+            f"{self.backups}: could not remove old backups: "))
+        self.assertTrue(old[-1].exists())
+
+    def test_a_name_with_an_impossible_time_is_not_a_backup(self):
+        make_wallet(self.db)[0].close()
+        self.backups.mkdir()
+        typo = self.backups / "wallet-20261318T052600Z.db.gz"
+        typo.write_bytes(b"")
+        result = B.run(self.db, self.backups, now=NOW)
+        self.assertEqual(result["prune_errors"], [])
+        self.assertEqual([b["name"] for b in B.list_backups(self.backups)],
+                         [result["name"]])
+        self.assertTrue(typo.exists())
 
 
 class CheckTests(Folder):
@@ -229,6 +348,26 @@ class CheckTests(Folder):
         for bad in (cut, flipped, text, not_db, self.dir / "missing.db.gz"):
             with self.assertRaises(B.BackupError, msg=bad.name):
                 B.check_file(bad)
+
+    @unittest.skipIf(resource is None, "needs a file size limit")
+    def test_a_full_disk_while_unpacking_is_not_called_a_damaged_backup(self):
+        make_wallet(self.db)[0].close()
+        good = B.snapshot(self.db, self.backups, now=NOW)["path"]
+        before = self.db.read_bytes()
+        soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (16 * 1024, hard))    # like a full disk
+        try:
+            for unpack in (B.check_file, lambda path: B.restore(path, self.db, now=NOW)):
+                with self.assertRaisesRegex(B.BackupError, "could not unpack the backup"):
+                    unpack(good)
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertTrue(B.check_file(good)["ok"])
+        cut = self.dir / "cut.db.gz"
+        cut.write_bytes(Path(good).read_bytes()[:200])
+        with self.assertRaisesRegex(B.BackupError, "damaged or not a backup"):
+            B.check_file(cut)
 
     def test_the_live_database(self):
         conn = make_wallet(self.db)[0]
@@ -280,6 +419,25 @@ class RestoreTests(Folder):
         self.assertTrue(again["moved_aside"][-1].startswith(aside + "-2"))
         self.assertTrue(Path(aside).exists())
 
+    def test_everyone_logs_in_again_and_no_earlier_setup_code_works(self):
+        conn = A.connect(self.db)
+        code = A.issue_setup_code(conn, self.ali, admin_id=self.admin)
+        token = A.set_password_with_code(conn, "0911111111", code, "ali's long secret")
+        sams_code = A.issue_setup_code(conn, self.sam, admin_id=self.admin)  # never used
+        backup = B.snapshot(self.db, self.backups, now=NOW + timedelta(hours=1))["path"]
+        A.logout_everywhere(conn, token)        # Ali's phone was stolen
+        conn.close()
+
+        result = B.restore(backup, self.db, now=NOW + timedelta(hours=2))
+        self.assertEqual((result["sessions_ended"], result["codes_voided"]), (1, 1))
+        conn = A.connect(self.db)
+        self.addCleanup(conn.close)
+        with self.assertRaises(A.NotLoggedIn):
+            A.authenticate(conn, token)
+        with self.assertRaises(A.LoginFailed):
+            A.set_password_with_code(conn, "0922222222", sams_code, "sam's long secret")
+        A.authenticate(conn, A.login(conn, "0911111111", "ali's long secret"))
+
     def test_into_a_new_place(self):
         target = self.dir / "new" / "wallet.db"
         result = B.restore(self.backup, target, now=NOW)
@@ -313,6 +471,23 @@ class RestoreTests(Folder):
             self.assertTrue(Path(f"{self.db}-wal").exists())
         self.assertEqual(sorted(p.name for p in self.live.iterdir()),
                          ["wallet.db", "wallet.db-shm", "wallet.db-wal", "wallet.db.lock"])
+
+
+class FileModeTests(Folder):
+    @unittest.skipIf(os.name == "nt", "Windows has no such file modes")
+    def test_backups_copies_and_a_restored_database_are_for_their_owner_only(self):
+        self.addCleanup(os.umask, os.umask(0o022))      # the usual umask outside Docker
+        make_wallet(self.db)[0].close()
+        usb = self.dir / "usb"
+        usb.mkdir()
+        result = B.run(self.db, self.backups, [usb], now=NOW)
+        B.restore(result["path"], self.db, now=NOW)
+
+        def mode(path):
+            return stat.S_IMODE(os.stat(path).st_mode)
+        self.assertEqual(mode(self.backups), 0o700)
+        for path in (result["path"], result["copies"][0], self.db, f"{self.db}.lock"):
+            self.assertEqual(mode(path), 0o600, msg=path)
 
 
 class ServerLockTests(Folder):
