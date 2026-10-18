@@ -7,9 +7,14 @@
     python3 -m app.manage check-backup backups/wallet-20261018T052600Z.db.gz
     python3 -m app.manage restore backups/wallet-20261018T052600Z.db.gz --db wallet.db
 
-Exit status: 0 done; 1 failed (a plain message on stderr); 2 for backup and
-check when the ledger check found problems (a backup is still made: it shows
-how things were).
+Exit status: 0 done; 1 failed, including a mistyped command (a plain message
+on stderr); 2 for backup and check when the ledger or order checks found
+problems (a backup is still made: it shows how things were). A backup that
+was made but could not be copied, or its old ones removed, is 1, and still
+shows the problems.
+
+The files and folders it makes (a database, backups) are for the user it
+runs as only (umask 077; not on Windows).
 
 --db and --dir can be left out where WALLET_DB and WALLET_BACKUP_DIR are set
 (as in the container: docker compose exec app manage backup).
@@ -68,13 +73,15 @@ def backup(args):
         _say(f"copied to {copy}")
     for path in result["pruned"]:
         _say(f"removed old {path}")
+    # The ledger problems first, so a copy that failed as well doesn't hide them.
+    _problems(result["problems"])
+    failed = []
     if result["copy_errors"]:
-        raise Failed("the backup was made, but copying it failed: "
-                     + "; ".join(result["copy_errors"]))
-    if result["problems"]:
-        _problems(result["problems"])
-        return PROBLEMS
-    return OK
+        failed.append("copying it failed: " + "; ".join(result["copy_errors"]))
+    failed += result.get("prune_errors", [])
+    if failed:
+        raise Failed("the backup was made, but " + "; ".join(failed))
+    return PROBLEMS if result["problems"] else OK
 
 
 def list_backups(args):
@@ -109,13 +116,19 @@ def restore(args):
     if not args.yes:
         _say(f"This puts {args.file} in place of {args.db}.",
              "Everything recorded after that backup was taken will be gone from the",
-             "database (the current file is kept aside). The server must be stopped.")
+             "database (the current file is kept aside). Blocks, deactivations,",
+             "password and setup-code changes and new accounts made since are undone",
+             "too, and must be done again. Everyone will have to log in again.",
+             "The server must be stopped.")
         if input("Type 'restore' to go ahead: ").strip() != "restore":
             raise Failed("not restored")
     result = B.restore(args.file, args.db)
     for path in result["moved_aside"]:
         _say(f"kept the replaced file as {path}")
-    _say(f"restored {args.db} from {args.file}")
+    ended, voided = result.get("sessions_ended", 0), result.get("codes_voided", 0)
+    _say(f"restored {args.db} from {args.file}",
+         f"everyone must log in again ({ended} session(s) ended)",
+         f"setup codes given out before the backup no longer work ({voided} voided)")
     if result["problems"]:
         _problems(result["problems"])
     return OK
@@ -136,9 +149,20 @@ def _dir(p):
                    help="the backups folder (or WALLET_BACKUP_DIR)")
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse, but a mistyped command exits 1 like any failure: its own 2
+    would read as 'a backup was made, and the ledger has problems'. The
+    subcommands' parsers are made of this class too (add_subparsers takes
+    the class of the parser it is called on)."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(FAILED, f"{self.prog}: error: {message}\n")
+
+
 def _parser():
-    parser = argparse.ArgumentParser(prog="python3 -m app.manage",
-                                     description="Look after the LYD wallet database.")
+    parser = _Parser(prog="python3 -m app.manage",
+                     description="Look after the LYD wallet database.")
     commands = parser.add_subparsers(dest="command", required=True)
 
     p = commands.add_parser("first-admin", help="create the first admin (asks for the password)")
@@ -177,6 +201,8 @@ def _parser():
 
 
 def main(argv=None):
+    if os.name != "nt":
+        os.umask(0o077)         # the database and its backups: for this user only
     args = _parser().parse_args(argv)
     try:
         return args.func(args)
