@@ -327,7 +327,11 @@ def prune(backup_dir, *, now=None, errors=None):
                 remove(path)
     cutoff = now.timestamp() - LEFTOVER_HOURS * 3600
     for path in folder.iterdir():
-        if _leftover(path) and path.stat().st_mtime < cutoff:
+        try:
+            old = _leftover(path) and path.stat().st_mtime < cutoff
+        except FileNotFoundError:       # removed by another prune meanwhile
+            continue
+        if old:
             remove(path)
     if errors is not None:
         errors += failed

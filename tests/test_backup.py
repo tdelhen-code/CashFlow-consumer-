@@ -281,6 +281,24 @@ class PruneTests(Folder):
                 B.prune(self.backups, now=NOW)
         self.assertFalse(older.exists())
 
+    def test_a_leftover_removed_meanwhile_is_skipped(self):
+        # A second prune at the same moment can remove a leftover between the
+        # listing of the folder and the look at its age.
+        old = [self.backups / self.fake(NOW - timedelta(days=800 + i))
+               for i in range(B.KEEP_ALL_HOURS + 1)]
+        leftover = self.backups / "wallet-20261017T110000Z.db.gz.k2j4h5g6.partial"
+        leftover.write_bytes(b"x")
+        leftover_check = B._leftover
+
+        def taken_meanwhile(path):
+            found = leftover_check(path)
+            if found:
+                path.unlink()
+            return found
+        with mock.patch.object(B, "_leftover", taken_meanwhile):
+            deleted = B.prune(self.backups, now=NOW)
+        self.assertEqual(deleted, [str(old[-1])])
+
 
 class RunTests(Folder):
     def old_backups(self, count):
