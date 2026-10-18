@@ -7,7 +7,9 @@ name: lyd-wallet
 
 services:
   app:
-    build: ..
+    build:
+      context: ..
+      pull: true                # each rebuild gets Python's and Debian's fixes
     image: lyd-wallet
     restart: unless-stopped
     # Only Caddy (its fixed address below) may say who the client is.
@@ -46,7 +48,8 @@ services:
 
   cloudflared:
     profiles: [tunnel]
-    image: cloudflare/cloudflared:2026.9.3
+    # CLOUDFLARED_VERSION in .env moves it to a newer release.
+    image: cloudflare/cloudflared:${CLOUDFLARED_VERSION:-2026.9.3}
     restart: unless-stopped
     depends_on: [caddy]
     command: ["tunnel", "--no-autoupdate", "run"]

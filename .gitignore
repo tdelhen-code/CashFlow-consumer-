@@ -6,5 +6,8 @@ __pycache__/
 *.db.gz
 *.db.lock
 *.before-restore-*
+*.partial
 deploy/.env
 deploy/backups/
+backups/
+.venv/

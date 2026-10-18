@@ -276,16 +276,29 @@ setting it up, backups, restoring), and [deploy/](deploy/README.md) has it all
 set up with Docker: this app, Caddy for HTTPS, and a Cloudflare Tunnel for a
 computer without a public address.
 
-The production server (`app/serve.py`, needs `pip install --require-hashes -r
-requirements.txt`):
+The production server (`app/serve.py`). It needs waitress, installed in a
+virtual environment: the system's own pip refuses to install anything on
+Ubuntu 24.04 and the other systems that follow PEP 668.
 
-    python3 -m app.serve --db wallet.db --backup-dir backups [--proxy 127.0.0.1]
+    python3 -m venv .venv
+    .venv/bin/pip install --require-hashes -r requirements.txt
+    .venv/bin/python -m app.serve --db wallet.db --backup-dir backups [--proxy 127.0.0.1]
         [--copy-to FOLDER] [--backup-every 60] [--check-every 60] [--ping-url URL]
 
 - the app on waitress, in one process, on 127.0.0.1:8000 unless `--host` and
   `--port` say otherwise. It holds an OS lock on `<db>.lock` while it runs: a
   second server on the same database is refused (the limits are kept per
   process), and so is a restore;
+- the files and folders it makes (the database, the backups) can be read by
+  the user it runs as only (umask 077, not on Windows). `app.manage` does the
+  same, and backups, their copies and a restored database are made 0600
+  whatever the umask;
+- it refuses to start (exit status 1, an `error: ...` line) when the `--db`
+  file is not there but `--backup-dir` already has backups of that database
+  (the same name stem): the backups of a new, empty database would push the
+  real ones out. Restore one with `python3 -m app.manage restore` (with
+  Docker: `docker compose run --rm app manage restore /backups/<file>`), or
+  use an empty backup folder for a new wallet;
 - `--proxy` is the address of the HTTPS proxy in front (127.0.0.1 unless
   given; `""` for none). Only it may say who the client is: waitress takes
   the client from its `X-Forwarded-For` (the last entry) and drops the header
@@ -297,7 +310,9 @@ requirements.txt`):
   and tried again next time; it never stops the server;
 - `GET /api/admin/health` then has `maintenance`: `last_check` (`at`, `ok`,
   `problems` found, `error`), `last_backup` (`at`, `ok`, `name`, `error`,
-  `problems`, `copy_errors`), `last_good_backup_at`, `backups_on` and
+  `problems`, `copy_errors`, `prune_errors`; `ok` is false when there are
+  problems, copy errors or prune errors, but a sound file still counts for
+  `last_good_backup_at`), `last_good_backup_at`, `backups_on` and
   `backup_overdue` (no sound backup for more than twice the interval plus 10
   minutes). It is `null` when the app runs without them (the bundled server);
 - `--ping-url` (such as a healthchecks.io check) is called after each run,
@@ -314,6 +329,11 @@ Backups (`app/backup.py`, from the command line with `app.manage`):
     python3 -m app.manage check-backup backups/wallet-20261018T050000Z.db.gz
     python3 -m app.manage restore backups/wallet-20261018T050000Z.db.gz --db wallet.db
 
+It exits with 0 when done; 1 when it failed or was used wrongly, also when a
+backup was made but could not be copied or its old ones removed (a plain
+message on stderr); 2 when a backup was made or the check ran, and the ledger
+or order checks found problems.
+
 - a backup is a consistent copy made with SQLite's backup API while the app
   runs, as one gzip file named for the time in UTC
   (`wallet-20261018T050000Z.db.gz`, `-2` added for a second one in the same
@@ -321,12 +341,22 @@ Backups (`app/backup.py`, from the command line with `app.manage`):
   one whose ledger or order checks find problems is kept and reported (exit
   status 2), as it shows how things were. Never copy the `.db` file by hand
   while the app runs;
-- old backups are pruned only after a good one: every backup of the last 48
+- a `--copy-to` folder must already be there (made once on the drive): a
+  missing one is a copy error (`<folder> is not there (is the drive plugged
+  in?)`), never made, so the copy can't land on the server's own disk;
+- old backups are pruned only after a good one, in the backup folder and in
+  each `--copy-to` folder that got its copy: every backup of the last 48
   hours, the newest of each UTC day for 30 days and of each month for 12
-  months, and always the newest; only files named like backups are touched;
+  months, and always the 48 newest, whatever their dates. Only files named
+  like backups and its own unfinished files (`<name>.<random>.partial`,
+  `.tmp-wallet-backup-<random>`, after 24 hours) are touched. A prune that
+  fails is reported (`prune_errors`); the backup still counts as made;
 - `restore` checks the backup first, refuses one from a newer version of the
-  app, and is refused while a server holds the database's lock. The database
-  it replaces is moved aside with its `-wal` and `-shm` files, as
+  app, and is refused while a server holds the database's lock. Before the
+  restored copy is put in place, every session open in it is ended and every
+  setup code nobody had used is voided, so everyone logs in again and no setup
+  code given out before the backup still works. The database it replaces is
+  moved aside with its `-wal` and `-shm` files, as
   `<db>.before-restore-<time>`, never deleted;
 - `GET /api/ping` (no login) answers `{"ok": true}` when the server and its
   database answer, for the proxy's and the container's health checks.
