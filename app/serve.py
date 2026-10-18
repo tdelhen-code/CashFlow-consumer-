@@ -1,12 +1,22 @@
 """The production server: the web app on waitress, with the ledger check and
 the backups on a timer.
 
-    pip install -r requirements.txt
-    python3 -m app.serve --db /srv/wallet/wallet.db --backup-dir /srv/wallet/backups
+    python3 -m venv .venv
+    .venv/bin/pip install --require-hashes -r requirements.txt
+    .venv/bin/python -m app.serve --db /srv/wallet/wallet.db --backup-dir /srv/wallet/backups
+
+(waitress goes into a virtual environment: the system's own pip refuses to
+install anything on Ubuntu 24.04 and the other systems that follow PEP 668.)
 
 - One process, holding the database's lock (backup.server_lock) for as long
   as it runs: a second server on the same database is refused, as the request
   limits are kept per process, and a restore can't happen under it.
+- The files and folders it makes (the database, the backups) are for the
+  user it runs as only (umask 077; not on Windows).
+- It refuses to start when the --db file is not there but --backup-dir
+  already has backups of it: a lost database is restored (python3 -m
+  app.manage restore), never quietly replaced by an empty one whose backups
+  would push the real ones out. A new wallet needs an empty backup folder.
 - Behind an HTTPS proxy (Caddy; deploy/ has it set up). --proxy is the
   proxy's address (127.0.0.1 by default): waitress takes the client's address
   from that proxy's X-Forwarded-For only, and drops the header when anyone
@@ -34,6 +44,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from . import auth as A
 from . import backup as B
@@ -85,13 +96,13 @@ class Maintenance:
         with self._lock:
             return {"last_check": self.last_check, "last_backup": self.last_backup,
                     "last_good_backup_at": _iso(self.last_good_backup_at),
-                    "backups_on": self.backup_dir is not None,
+                    "backups_on": bool(self.backup_dir),
                     "backup_overdue": self._overdue()}
 
     def _overdue(self):
         """No sound backup for more than twice the interval (10 minutes' grace),
         counting from the start until the first one."""
-        if self.backup_dir is None:
+        if not self.backup_dir:
             return False
         since = self.last_good_backup_at or self.started_at
         return self.now() - since > 2 * timedelta(seconds=self.backup_every) + OVERDUE_GRACE
@@ -120,19 +131,25 @@ class Maintenance:
             error = f"{type(e).__name__}: {e}"
             with self._lock:
                 self.last_backup = {"at": _iso(at), "ok": False, "name": None,
-                                    "error": error, "problems": 0, "copy_errors": []}
+                                    "error": error, "problems": 0, "copy_errors": [],
+                                    "prune_errors": []}
             self.log(f"PROBLEM: the backup failed: {error}")
             return
         problems, copy_errors = result["problems"], result["copy_errors"]
+        prune_errors = result.get("prune_errors", [])
         with self._lock:
             self.last_good_backup_at = at       # a sound file was made
-            self.last_backup = {"at": _iso(at), "ok": not (problems or copy_errors),
+            self.last_backup = {"at": _iso(at),
+                                "ok": not (problems or copy_errors or prune_errors),
                                 "name": result["name"], "error": None,
-                                "problems": len(problems), "copy_errors": copy_errors}
+                                "problems": len(problems), "copy_errors": copy_errors,
+                                "prune_errors": prune_errors}
         self.log(f"backup: {result['name']} ({result['size']} bytes)"
                  + "".join(f", copied to {c}" for c in result["copies"]))
         for error in copy_errors:
             self.log(f"PROBLEM: the backup could not be copied to {error}")
+        for error in prune_errors:
+            self.log(f"PROBLEM: {error}")
         if problems:
             self.log(f"PROBLEM: the backup was made, but the ledger check found "
                      f"{len(problems)} problem(s) in it")
@@ -143,28 +160,40 @@ class Maintenance:
         with self._lock:
             ok = all(r is None or r["ok"] for r in (self.last_check, self.last_backup)) \
                 and not self._overdue()
-        url = self.ping_url if ok else self.ping_url.rstrip("/") + "/fail"
         try:
+            url = self.ping_url
+            if not ok:          # /fail goes on the path, before any ?query
+                parts = urllib.parse.urlsplit(url)
+                url = parts._replace(path=parts.path.rstrip("/") + "/fail").geturl()
             request = urllib.request.Request(url, headers={"User-Agent": "lyd-wallet"})
             with urllib.request.urlopen(request, timeout=PING_TIMEOUT) as answer:
                 answer.read(1024)
-        except (OSError, ValueError) as e:      # URLError and HTTPError are OSErrors
-            self.log(f"could not reach the ping address: {e}")
+        except Exception as e:      # not only OSErrors: a bad URL, a reply that isn't HTTP
+            self.log(f"could not reach the ping address: {type(e).__name__}: {str(e).strip()}")
+
+    def _step(self, what, step):
+        """Run one step of the timer. Whatever goes wrong in it is logged and
+        the timer goes on: a thread that ended would make no more checks or
+        backups, and tell nobody."""
+        try:
+            step()
+        except Exception as e:
+            self.log(f"PROBLEM: the {what} went wrong: {type(e).__name__}: {e}")
 
     def _run(self):
         clock = time.monotonic
         next_check = next_backup = clock() + self.first_run
-        if self.backup_dir is None:
+        if not self.backup_dir:
             next_backup = float("inf")
         while not self._stop.wait(max(0, min(next_check, next_backup) - clock())):
             due = clock()
             if due >= next_check:
-                self.check()
+                self._step("ledger check", self.check)
                 next_check = due + self.check_every
             if due >= next_backup:
-                self.backup()
+                self._step("backup", self.backup)
                 next_backup = due + self.backup_every
-            self.ping()
+            self._step("ping", self.ping)
 
     def start(self):
         self._thread = threading.Thread(target=self._run, name="maintenance", daemon=True)
@@ -192,7 +221,20 @@ def create_server(app, *, host="127.0.0.1", port=8000, proxy="127.0.0.1", thread
     if proxy:
         options.update(trusted_proxy=proxy, trusted_proxy_count=1,
                        trusted_proxy_headers={"x-forwarded-for"})
-    return waitress_server(app, **options)
+    try:
+        return waitress_server(app, **options)
+    except ValueError as e:     # waitress: a host that doesn't resolve, for one
+        raise ServeError(f"cannot listen on {host} port {port}: {e}") from None
+
+
+def _addresses(server):
+    """Where `server` listens. --host can give more than one address (localhost
+    is ::1 and 127.0.0.1 on most systems), and then waitress makes one server
+    for all of them, with a list instead of one host and port."""
+    listen = getattr(server, "effective_listen", None) or \
+        [(server.effective_host, server.effective_port)]
+    return " and ".join(f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
+                        for host, port in listen)
 
 
 def _stop_on_signals():
@@ -210,9 +252,25 @@ def _minutes(text):
     return value * 60
 
 
+def _port(text):
+    value = int(text)
+    if not 0 <= value <= 65535:     # the system would quietly take 70000 as 4464
+        raise argparse.ArgumentTypeError("must be from 0 to 65535")
+    return value
+
+
 def _ping_url(text):
-    if urllib.parse.urlsplit(text).scheme not in ("http", "https"):
+    """An http(s) address with a host, and nothing in it that would only fail
+    at the first ping: a space, a control character, a port that isn't one."""
+    try:
+        parts = urllib.parse.urlsplit(text)
+        parts.port                  # ValueError when it isn't a port number
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"is not a usable address: {e}") from None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
         raise argparse.ArgumentTypeError("must be an http:// or https:// address")
+    if any(c.isspace() or not c.isprintable() for c in text):
+        raise argparse.ArgumentTypeError("must not have spaces or control characters")
     return text
 
 
@@ -226,7 +284,7 @@ def _parser():
     parser.add_argument("--db", default=_env("WALLET_DB"), required=not _env("WALLET_DB"),
                         help="the database file (or WALLET_DB)")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=_port, default=8000)
     parser.add_argument("--proxy", default="127.0.0.1",
                         help="address of the HTTPS proxy in front (empty: none)")
     parser.add_argument("--threads", type=int, default=THREADS)
@@ -244,15 +302,45 @@ def _parser():
     return parser
 
 
-def main(argv=None):
+def _arguments(argv):
+    """The settings: the command line, then WALLET_* for what it leaves out."""
     args = _parser().parse_args(argv)
+    args.backup_dir = args.backup_dir or None       # --backup-dir "": no backups
     if args.copy_to is None:
-        args.copy_to = [f for f in (_env("WALLET_COPY_TO") or "").split(os.pathsep) if f]
+        args.copy_to = (_env("WALLET_COPY_TO") or "").split(os.pathsep)
+    args.copy_to = [f for f in args.copy_to if f]
+    return args
+
+
+def _has_backups(backup_dir, db_path):
+    """Whether `backup_dir` holds backups of the database at `db_path` (they
+    are named for its stem). A folder that isn't there yet holds none."""
+    stem = Path(db_path).stem
+    try:
+        found = B.list_backups(backup_dir)
+    except FileNotFoundError:
+        return False
+    return any(B.NAME.match(b["name"])["stem"] == stem for b in found)
+
+
+def main(argv=None):
+    if os.name != "nt":
+        os.umask(0o077)         # the database and its backups: for this user only
+    args = _arguments(argv)
     if args.copy_to and not args.backup_dir:
         print("error: --copy-to needs --backup-dir", file=sys.stderr)
         return 1
     try:
         with B.server_lock(args.db):
+            # Connecting would make a new, empty database: its backups would
+            # then push out the ones of the database that went missing.
+            if args.backup_dir and not Path(args.db).exists() \
+                    and _has_backups(args.backup_dir, args.db):
+                raise ServeError(
+                    f"there is no database at {args.db}, but {args.backup_dir} has "
+                    "backups of it: restore one with python3 -m app.manage restore "
+                    "(with Docker: docker compose run --rm app manage restore "
+                    "/backups/<file>), or use an empty backup folder for a new wallet")
             app = W.make_app(args.db)
             maintenance = Maintenance(args.db, backup_dir=args.backup_dir,
                                       copy_to=args.copy_to, check_every=args.check_every,
@@ -260,15 +348,15 @@ def main(argv=None):
             app.maintenance = maintenance
             server = create_server(app, host=args.host, port=args.port,
                                    proxy=args.proxy, threads=args.threads)
-            _stop_on_signals()
-            maintenance.start()
-            log(f"LYD wallet on http://{args.host}:{server.effective_port} "
+            log(f"LYD wallet on {_addresses(server)} "
                 f"(database {args.db}; proxy {args.proxy or 'none'}; "
                 f"backups {args.backup_dir or 'off'})")
             if not _has_admin(args.db):
                 log("no admin yet: create the first one with python3 -m app.manage "
                     "first-admin (with Docker: docker compose exec app manage first-admin)")
+            _stop_on_signals()
             try:
+                maintenance.start()     # in the try, so that it is always stopped
                 server.run()            # until SIGTERM or Ctrl+C
             except KeyboardInterrupt:
                 pass
