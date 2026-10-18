@@ -212,7 +212,9 @@ def create_server(app, *, host="127.0.0.1", port=8000, proxy="127.0.0.1", thread
     try:
         from waitress.server import create_server as waitress_server
     except ImportError:
-        raise ServeError("waitress is not installed: pip install -r requirements.txt") \
+        raise ServeError("waitress is not installed: python3 -m venv .venv, then "
+                         ".venv/bin/pip install --require-hashes -r requirements.txt, "
+                         "and start the server with .venv/bin/python -m app.serve") \
             from None
     options = dict(host=host, port=port, threads=threads,
                    max_request_body_size=MAX_REQUEST_BYTES,

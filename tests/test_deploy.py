@@ -203,6 +203,13 @@ class GuideTests(unittest.TestCase):
         for latest in re.findall(r"restic restore latest[^`\n]*", gone):
             self.assertIn("--host", latest)
         self.assertIn("/tmp/restored/srv/lyd-wallet/deploy/backups", gone)
+        # the same domain, tunnel, repository and checks as the old server
+        for said in ("change its A record to the new server's IPv4 address instead of "
+                     "adding a second one", "copy its token again, instead of making a new "
+                     "tunnel", "don't run `restic init`: the repository is already there",
+                     "Don't run `restic init` or make new checks"):
+            self.assertIn(said, flat(gone))
+        self.assertNotIn("restic init", steps)
         # the app refuses to start on backups without their database
         missing = flat(between(self.hosting, "**When the app won't start", "**What a restore"))
         self.assertIn("refuses to start", missing)
@@ -260,6 +267,17 @@ class GuideTests(unittest.TestCase):
         self.assertIn("in place of `{$SITE_ADDRESS}`", flat(without))
         self.assertIn("`reverse_proxy 127.0.0.1:8000` in place of", flat(without))
         self.assertIn("folder must already be there", flat(self.section(4)))
+
+    def test_without_docker_manage_runs_as_the_wallet_user(self):
+        # The wallet's files are for that user only: another can't open them,
+        # and a restore run as root leaves a database the server can't open.
+        without = between(self.hosting, "## Without Docker", "\n## ")
+        manage = [s for s in commands(without) if "app.manage" in s]
+        self.assertTrue(manage)
+        for command in manage:
+            self.assertTrue(command.startswith("sudo -u wallet "), command)
+        self.assertIn("`/srv/wallet/backups` in place of `/srv/lyd-wallet/deploy/backups`",
+                      flat(without))
 
     def test_the_project_is_cloned_so_it_can_be_updated(self):
         clone = "git clone https://github.com/tdelhen-code/CashFlow-consumer-.git"

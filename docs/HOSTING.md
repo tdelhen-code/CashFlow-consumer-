@@ -325,10 +325,16 @@ wallet.
 
 1. **Set up a new one**, but only steps 1 to 5 of section 2 (or of section
    3), up to filling in `.env`. Don't start the app, and don't set up the
-   off-site copy yet.
+   off-site copy yet. You already have the domain: at its DNS, change its A
+   record to the new server's IPv4 address instead of adding a second one.
+   Behind the tunnel, open the tunnel you already have in the Cloudflare
+   dashboard and copy its token again, instead of making a new tunnel and
+   hostname.
 2. **Get the backups back.** With restic, on the new server: install it, put
-   back `~/.restic-password` and `~/.restic-env` from your copies (section 4,
-   steps 3 and 4), then load the settings and list the copies:
+   back `~/.restic-password` and `~/.restic-env` from your copies (as in
+   section 4, steps 3 and 4, with the same `chmod 600`, but don't run
+   `restic init`: the repository is already there), then load the settings
+   and list the copies:
 
        sudo apt install restic curl
        . ~/.restic-env
@@ -365,9 +371,12 @@ wallet.
    Don't create a first admin: the admins are in the backup.
 5. **Check it:** `https://wallet.example.com/api/ping` shows `{"ok": true}`,
    and `docker compose exec app manage check` finds nothing wrong.
-6. **Set up the off-site copy and both alerts** as in section 4 (the same
-   restic repository and the same two checks), and do what "What a restore
-   means" below says.
+6. **Set up the off-site copy and both alerts** with the checks you already
+   have. Put the first check's ping address in `.env` as `WALLET_PING_URL`
+   and run `docker compose up -d` again, as "Know when something is wrong"
+   (section 4) says. Then do section 4's steps 5 and 6 (the script and the
+   cron line), with the second check's ping address. Don't run `restic init`
+   or make new checks. Last, do what "What a restore means" below says.
 
 **When the app won't start because its database is missing.** When the
 database is gone but `BACKUP_DIR` has backups of it (for example when the
@@ -449,12 +458,23 @@ its own, not as root:
     sudo adduser --system --group --home /srv/wallet wallet
     sudo -u wallet .venv/bin/python -m app.serve --db /srv/wallet/wallet.db --backup-dir /srv/wallet/backups
 
-The wallet makes its files readable by that user only. Run Caddy on the same
-machine (from Caddy's own package, <https://caddyserver.com/docs/install>:
-this Caddyfile needs Caddy 2.7 or newer), with a copy of `deploy/Caddyfile`
-as `/etc/caddy/Caddyfile` and two changes in it: your domain in place of
-`{$SITE_ADDRESS}` (Caddy's own service has no such setting), and
-`reverse_proxy 127.0.0.1:8000` in place of `reverse_proxy app:8000`. A
-`--copy-to` folder must already be there (section 4).
+The wallet makes its files readable by that user only, so run `app.manage`
+as that user too, for example:
+
+    sudo -u wallet .venv/bin/python -m app.manage first-admin --db /srv/wallet/wallet.db --name "Your name" --phone "091 000 0000"
+
+The same goes for `backup`, `list`, `check` and `restore`. Run as root, a
+restore leaves a database the wallet user can't open; if that happened,
+`sudo chown wallet: /srv/wallet/wallet.db*` puts it right. Set up the
+off-site copy (section 4) as root, after `sudo -i`, with
+`/srv/wallet/backups` in place of `/srv/lyd-wallet/deploy/backups`.
+
+Run Caddy on the same machine (from Caddy's own package,
+<https://caddyserver.com/docs/install>: this Caddyfile needs Caddy 2.7 or
+newer), with a copy of `deploy/Caddyfile` as `/etc/caddy/Caddyfile` and two
+changes in it: your domain in place of `{$SITE_ADDRESS}` (Caddy's own
+service has no such setting), and `reverse_proxy 127.0.0.1:8000` in place of
+`reverse_proxy app:8000`. A `--copy-to` folder must already be there
+(section 4).
 `.venv/bin/python -m app.serve --help` lists every option, and
 `.venv/bin/python -m app.manage --help` lists the commands.

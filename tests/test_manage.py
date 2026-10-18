@@ -175,10 +175,16 @@ class ManageTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "no umask on Windows")
     def test_what_it_makes_only_its_user_can_read(self):
-        make_wallet(self.db)[0].close()
+        secret = "a long admin secret"
         usb = self.dir / "usb"
         usb.mkdir()
         os.umask(0o022)                             # as most shells have it
+        self.assertEqual(self.run_cli("first-admin", "--db", self.db, "--name", "Huda",
+                                      "--phone", "0910000000",
+                                      passwords=[secret, secret])[0], 0)
+        # Only the umask covers this one: connecting makes the new database.
+        self.assertEqual(stat.S_IMODE(self.db.stat().st_mode) & 0o077, 0)
+        os.umask(0o022)
         self.assertEqual(self.run_cli("backup", "--db", self.db, "--dir", self.backups,
                                       "--copy-to", usb)[0], 0)
         [backup] = B.list_backups(self.backups)

@@ -454,6 +454,15 @@ class MainTests(Folder):
         self.assertTrue(err.getvalue().startswith("error: cannot listen on wallet.invalid"),
                         err.getvalue())
 
+    def test_without_waitress_it_says_how_to_install_it(self):
+        err = io.StringIO()
+        with mock.patch.dict(sys.modules, {"waitress.server": None}), redirect_stderr(err):
+            status = S.main(["--db", str(self.db), "--port", "0"])
+        self.assertEqual(status, 1)
+        # In a virtual environment, as the system's own pip refuses (PEP 668).
+        self.assertIn("python3 -m venv .venv, then .venv/bin/pip install --require-hashes "
+                      "-r requirements.txt", err.getvalue())
+
     def run_server(self, *command):
         """The server in its own process, without the shell's WALLET_* settings;
         returns it and its first log line."""

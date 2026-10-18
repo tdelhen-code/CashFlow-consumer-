@@ -254,6 +254,33 @@ class PruneTests(Folder):
         self.assertEqual(sorted(deleted), sorted(str(self.backups / n) for n in ours))
         self.assertEqual(names(self.backups), sorted(others + [fresh]))
 
+    def test_goes_on_past_a_file_it_cannot_remove(self):
+        old = [self.backups / self.fake(NOW - timedelta(days=800 + i))
+               for i in range(B.KEEP_ALL_HOURS + 3)]
+        stuck = old[B.KEEP_ALL_HOURS]               # the first one it removes
+        leftover = self.backups / "wallet-20261017T110000Z.db.gz.k2j4h5g6.partial"
+        leftover.write_bytes(b"x")
+        day_ago = NOW.timestamp() - 25 * 3600
+        os.utime(leftover, (day_ago, day_ago))
+        unlink = Path.unlink
+
+        def read_only(path, missing_ok=False):
+            if path == stuck:
+                raise PermissionError(13, "Permission denied", str(path))
+            unlink(path, missing_ok=missing_ok)
+        errors = []
+        with mock.patch.object(Path, "unlink", read_only):
+            deleted = B.prune(self.backups, now=NOW, errors=errors)
+            self.assertEqual(sorted(deleted), sorted(
+                str(p) for p in old[B.KEEP_ALL_HOURS + 1:] + [leftover]))
+            self.assertEqual([e.filename for e in errors], [str(stuck)])
+            self.assertTrue(stuck.exists())
+            # Without a list for them, the error is raised, after the rest.
+            older = self.backups / self.fake(NOW - timedelta(days=900))
+            with self.assertRaises(PermissionError):
+                B.prune(self.backups, now=NOW)
+        self.assertFalse(older.exists())
+
 
 class RunTests(Folder):
     def old_backups(self, count):
@@ -316,6 +343,24 @@ class RunTests(Folder):
         self.assertTrue(result["prune_errors"][0].startswith(
             f"{self.backups}: could not remove old backups: "))
         self.assertTrue(old[-1].exists())
+
+    def test_old_backups_that_cannot_be_removed_do_not_keep_the_others(self):
+        make_wallet(self.db)[0].close()
+        old = self.old_backups(B.KEEP_ALL_HOURS + 2)   # with the new one, 3 too many
+        stuck = old[B.KEEP_ALL_HOURS - 1:B.KEEP_ALL_HOURS + 1]
+        unlink = Path.unlink
+
+        def read_only(path, missing_ok=False):
+            if path in stuck:
+                raise PermissionError(13, "Permission denied", str(path))
+            unlink(path, missing_ok=missing_ok)
+        with mock.patch.object(Path, "unlink", read_only):
+            result = B.run(self.db, self.backups, now=NOW)
+        self.assertEqual(result["pruned"], [str(old[-1])])     # shown as removed
+        self.assertFalse(old[-1].exists())
+        self.assertEqual(result["prune_errors"], [
+            f"{self.backups}: could not remove old backups: [Errno 13] Permission "
+            f"denied: '{stuck[0]}' (and 1 more)"])
 
     def test_a_name_with_an_impossible_time_is_not_a_backup(self):
         make_wallet(self.db)[0].close()

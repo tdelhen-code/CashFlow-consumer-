@@ -298,28 +298,41 @@ def _leftover(path):
     return bool(NAME.match(unfinished) or NAME.match(unfinished.rpartition(".")[0]))
 
 
-def prune(backup_dir, *, now=None):
+def prune(backup_dir, *, now=None, errors=None):
     """Delete the backups the rules don't keep (see the top of this file), and
-    unfinished files left by an interrupted backup. Returns the deleted paths."""
+    unfinished files left by an interrupted backup. Returns the deleted paths.
+    A file it can't remove (held open, read-only) is left for the next run,
+    and the others are still removed: its error goes into the list `errors`,
+    or, without one, the first error is raised once the rest are done."""
     now, folder = _utc(now), Path(backup_dir)
-    by_db = {}
-    for backup in _backups(folder):
-        by_db.setdefault(backup[2], []).append(backup)
-    deleted = []
-    for backups in by_db.values():
-        keep = _keep(backups, now)
-        for _, _, _, path in backups:
-            if path not in keep:
-                path.unlink(missing_ok=True)
-                deleted.append(str(path))
-    cutoff = now.timestamp() - LEFTOVER_HOURS * 3600
-    for path in folder.iterdir():
-        if _leftover(path) and path.stat().st_mtime < cutoff:
+    deleted, failed = [], []
+
+    def remove(path):
+        try:
             if path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
             else:
                 path.unlink(missing_ok=True)
+        except OSError as e:
+            failed.append(e)
+        else:
             deleted.append(str(path))
+    by_db = {}
+    for backup in _backups(folder):
+        by_db.setdefault(backup[2], []).append(backup)
+    for backups in by_db.values():
+        keep = _keep(backups, now)
+        for _, _, _, path in backups:
+            if path not in keep:
+                remove(path)
+    cutoff = now.timestamp() - LEFTOVER_HOURS * 3600
+    for path in folder.iterdir():
+        if _leftover(path) and path.stat().st_mtime < cutoff:
+            remove(path)
+    if errors is not None:
+        errors += failed
+    elif failed:
+        raise failed[0]
     return deleted
 
 
@@ -360,10 +373,15 @@ def run(db_path, backup_dir, copy_to=(), *, now=None):
         except OSError as e:
             result["copy_errors"].append(f"{folder}: {e}")
     for folder in folders:
+        errors = []
         try:
-            result["pruned"] += prune(folder, now=now)
-        except (OSError, ValueError) as e:
-            result["prune_errors"].append(f"{folder}: could not remove old backups: {e}")
+            result["pruned"] += prune(folder, now=now, errors=errors)
+        except (OSError, ValueError) as e:      # the folder itself can't be read
+            errors.append(e)
+        if errors:              # one line per folder, however many files
+            more = f" (and {len(errors) - 1} more)" if len(errors) > 1 else ""
+            result["prune_errors"].append(
+                f"{folder}: could not remove old backups: {errors[0]}{more}")
     return result
 
 
