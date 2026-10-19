@@ -2069,8 +2069,12 @@
     byId("password-form").addEventListener("submit", onPassword);
     byId("logout").addEventListener("click", onLogout);
     byId("logout-all").addEventListener("click", function () {
-      byId("logout-all-confirm").hidden = false;
+      var box = byId("logout-all-confirm");
+      box.hidden = false;
       byId("logout-all-question").focus();
+      // The focus brings only the question into view; its two buttons come
+      // with it, above the bottom bar.
+      box.scrollIntoView({block: "nearest"});
     });
     byId("logout-all-no").addEventListener("click", function () {
       byId("logout-all-confirm").hidden = true;

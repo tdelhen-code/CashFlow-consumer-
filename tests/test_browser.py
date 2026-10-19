@@ -405,6 +405,15 @@ class BrowserTests(unittest.TestCase):
         width, inner = page.evaluate("[document.documentElement.scrollWidth, innerWidth]")
         self.assertLessEqual(width, inner, "the screen scrolls sideways")
 
+    def assert_above_the_bar(self, page, selector):
+        """The element is in view whole, not hidden under the bottom bar."""
+        top, bottom, bar = page.evaluate(
+            "s => [document.querySelector(s).getBoundingClientRect().top,"
+            " document.querySelector(s).getBoundingClientRect().bottom,"
+            " document.querySelector('#nav').getBoundingClientRect().top]", selector)
+        self.assertGreaterEqual(top, 0, f"{selector} is above the screen")
+        self.assertLessEqual(bottom, bar, f"{selector} is under the bottom bar")
+
     def assert_text(self, page, selector, expected):
         """The element shows exactly `expected` (waiting for it a while)."""
         expect(page.locator(selector)).to_have_text(expected)
@@ -1204,6 +1213,7 @@ class BrowserTests(unittest.TestCase):
         expect(here.locator("#logout-all-confirm")).to_be_hidden()
         self.tap(here, "#logout-all")
         expect(here.locator("#logout-all-confirm")).to_be_visible()
+        self.assert_above_the_bar(here, "#logout-all-confirm")    # its buttons too
         self.assert_fits(here)
         self.tap(here, "#logout-all-yes")
         self.on_screen(here, "login")

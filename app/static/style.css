@@ -65,6 +65,9 @@
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  /* A line or box scrolled to (an error given the focus, the log-out-
+     everywhere question) stops above the bottom bar, not under it. */
+  scroll-padding-block-end: calc(var(--nav-height) + 16px + env(safe-area-inset-bottom, 0px));
 }
 
 body {
