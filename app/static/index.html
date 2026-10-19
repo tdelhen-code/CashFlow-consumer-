@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="format-detection" content="telephone=no">
+<title data-i18n="app.title">Al Naseem Wallet</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/strings.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<!--
+  The workers' screens: one page, one <section> per screen, picked by the
+  address's #/<screen>. Every text comes from strings.js (data-i18n* names
+  its key) and app.js fills in the rest; nothing here is shown as written.
+  The ids are what app.js and tests/test_browser.py rely on.
+-->
+<body data-screen="loading" data-pending="0">
+
+<header class="bar">
+  <span class="bar-icon" aria-hidden="true"></span>
+  <span class="bar-title" data-i18n="app.title"></span>
+</header>
+
+<div id="notice" class="notice" role="status" tabindex="-1" hidden></div>
+
+<main id="main" class="main">
+
+<section id="screen-loading" data-screen="loading" aria-labelledby="loading-title">
+  <h1 id="loading-title" class="visually-hidden" tabindex="-1" data-i18n="app.title"></h1>
+  <div class="spinner" aria-hidden="true"></div>
+  <p class="muted center" data-i18n="app.loading"></p>
+</section>
+
+<section id="screen-offline" data-screen="offline" aria-labelledby="offline-title" hidden>
+  <h1 id="offline-title" tabindex="-1" data-i18n="offline.title"></h1>
+  <p id="offline-text" class="error"></p>
+  <button id="offline-retry" type="button" class="button primary" data-i18n="common.retry"></button>
+</section>
+
+<section id="screen-login" data-screen="login" aria-labelledby="login-title" hidden>
+  <h1 id="login-title" tabindex="-1" data-i18n="login.title"></h1>
+  <form id="login-form" method="post" action="/" novalidate>
+    <div class="field">
+      <label for="login-phone" data-i18n="login.phone"></label>
+      <input id="login-phone" name="phone" type="tel" inputmode="tel" autocomplete="username"
+             maxlength="40" aria-describedby="login-phone-hint">
+      <p id="login-phone-hint" class="hint" data-i18n="login.phone_hint"></p>
+    </div>
+    <div class="field">
+      <label for="login-password" data-i18n="login.password"></label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password"
+             maxlength="128">
+    </div>
+    <p id="login-error" class="error" tabindex="-1" hidden></p>
+    <button id="login-submit" type="submit" class="button primary" data-i18n="login.submit"></button>
+  </form>
+  <p class="aside"><a id="login-to-setup" href="#/setup" data-i18n="login.to_setup"></a></p>
+</section>
+
+<section id="screen-setup" data-screen="setup" aria-labelledby="setup-title" hidden>
+  <h1 id="setup-title" tabindex="-1" data-i18n="setup.title"></h1>
+  <p data-i18n="setup.intro"></p>
+  <form id="setup-form" method="post" action="/" novalidate>
+    <div class="field">
+      <label for="setup-phone" data-i18n="setup.phone"></label>
+      <input id="setup-phone" name="phone" type="tel" inputmode="tel" autocomplete="username"
+             maxlength="40" aria-describedby="setup-phone-hint">
+      <p id="setup-phone-hint" class="hint" data-i18n="login.phone_hint"></p>
+    </div>
+    <div class="field">
+      <label for="setup-code" data-i18n="setup.code"></label>
+      <input id="setup-code" name="code" type="text" autocomplete="one-time-code"
+             autocapitalize="characters" spellcheck="false" maxlength="40"
+             aria-describedby="setup-code-hint">
+      <p id="setup-code-hint" class="hint" data-i18n="setup.code_hint"></p>
+    </div>
+    <div class="field">
+      <label for="setup-password" data-i18n="setup.password"></label>
+      <input id="setup-password" name="password" type="password" autocomplete="new-password"
+             maxlength="128" aria-describedby="setup-password-hint">
+      <p id="setup-password-hint" class="hint" data-i18n="setup.password_hint"></p>
+    </div>
+    <div class="field">
+      <label for="setup-password2" data-i18n="setup.password2"></label>
+      <input id="setup-password2" name="password2" type="password" autocomplete="new-password"
+             maxlength="128">
+    </div>
+    <p id="setup-error" class="error" tabindex="-1" hidden></p>
+    <button id="setup-submit" type="submit" class="button primary" data-i18n="setup.submit"></button>
+  </form>
+  <p class="aside"><a id="setup-to-login" href="#/login" data-i18n="setup.to_login"></a></p>
+</section>
+
+<section id="screen-home" data-screen="home" aria-labelledby="home-name" hidden>
+  <h1 id="home-name" tabindex="-1"></h1>
+  <div class="card balance-card">
+    <p class="label" data-i18n="home.balance"></p>
+    <p id="home-balance" class="balance num"></p>
+    <p id="home-updated" class="muted small"></p>
+  </div>
+  <button id="home-refresh" type="button" class="button secondary" data-i18n="common.refresh"></button>
+  <p id="home-error" class="error" tabindex="-1" hidden></p>
+  <h2 data-i18n="home.activity"></h2>
+  <ul id="statement-list" class="list" aria-busy="false"></ul>
+  <p id="statement-empty" class="empty" data-i18n="home.empty" hidden></p>
+  <button id="statement-more" type="button" class="button secondary" data-i18n="common.more" hidden></button>
+</section>
+
+<section id="screen-send" data-screen="send" data-step="form" aria-labelledby="send-title" hidden>
+  <h1 id="send-title" tabindex="-1" data-i18n="send.title"></h1>
+
+  <div id="send-step-form" class="step">
+    <p id="send-balance" class="muted"></p>
+    <form id="send-form" method="post" action="/" novalidate>
+      <div class="field">
+        <label for="send-phone" data-i18n="send.phone"></label>
+        <input id="send-phone" name="to_phone" type="tel" inputmode="tel" autocomplete="off"
+               maxlength="40" aria-describedby="send-phone-hint">
+        <p id="send-phone-hint" class="hint" data-i18n="send.phone_hint"></p>
+      </div>
+      <div class="field">
+        <label for="send-amount" data-i18n="send.amount"></label>
+        <input id="send-amount" name="amount" type="text" inputmode="decimal" autocomplete="off"
+               maxlength="20" aria-describedby="send-amount-hint">
+        <p id="send-amount-hint" class="hint" data-i18n="send.amount_hint"></p>
+      </div>
+      <div class="field">
+        <label for="send-note" data-i18n="send.note"></label>
+        <input id="send-note" name="note" type="text" autocomplete="off" maxlength="200">
+      </div>
+      <p id="send-error" class="error" tabindex="-1" hidden></p>
+      <button id="send-next" type="submit" class="button primary" data-i18n="send.next"></button>
+    </form>
+  </div>
+
+  <div id="send-step-confirm" class="step" hidden>
+    <h2 id="send-confirm-title" tabindex="-1" data-i18n="send.confirm_title"></h2>
+    <dl class="card facts">
+      <div>
+        <dt data-i18n="send.to"></dt>
+        <dd><span id="send-confirm-name" class="strong"></span> <span id="send-confirm-phone" class="num muted"></span></dd>
+      </div>
+      <div>
+        <dt data-i18n="send.amount_label"></dt>
+        <dd id="send-confirm-amount" class="num strong"></dd>
+      </div>
+      <div id="send-confirm-note-row">
+        <dt data-i18n="send.note_label"></dt>
+        <dd id="send-confirm-note"></dd>
+      </div>
+    </dl>
+    <p id="send-confirm-error" class="error" tabindex="-1" hidden></p>
+    <div class="actions">
+      <button id="send-confirm" type="button" class="button primary"></button>
+      <button id="send-edit" type="button" class="button secondary" data-i18n="send.edit"></button>
+      <button id="send-cancel" type="button" class="button secondary" data-i18n="send.cancel" hidden></button>
+    </div>
+  </div>
+
+  <div id="send-step-done" class="step" hidden>
+    <h2 id="send-done-title" class="success-title" tabindex="-1" data-i18n="send.done_title"></h2>
+    <div class="card">
+      <p id="send-done-text"></p>
+      <p id="send-done-balance" class="strong"></p>
+    </div>
+    <div class="actions">
+      <button id="send-done-ok" type="button" class="button primary" data-i18n="common.done"></button>
+      <button id="send-again" type="button" class="button secondary" data-i18n="send.again"></button>
+    </div>
+  </div>
+</section>
+
+<section id="screen-currency" data-screen="currency" data-step="ask" aria-labelledby="currency-title" hidden>
+  <h1 id="currency-title" tabindex="-1" data-i18n="currency.title"></h1>
+
+  <div id="currency-step-ask" class="step">
+    <div class="heading-row">
+      <h2 id="prices-title" tabindex="-1" data-i18n="currency.prices"></h2>
+      <button id="prices-refresh" type="button" class="button small secondary" data-i18n="common.refresh"></button>
+    </div>
+    <p id="prices-error" class="error" tabindex="-1" hidden></p>
+    <ul id="prices-list" class="list" aria-busy="false"></ul>
+    <p id="prices-empty" class="empty" data-i18n="currency.empty" hidden></p>
+    <p id="quote-notice" class="notice" tabindex="-1" hidden></p>
+    <form id="quote-form" method="post" action="/" novalidate hidden>
+      <div class="field">
+        <label for="quote-currency" data-i18n="quote.currency"></label>
+        <select id="quote-currency" name="currency"></select>
+      </div>
+      <div class="field">
+        <label for="quote-amount" data-i18n="quote.amount"></label>
+        <input id="quote-amount" name="amount" type="text" inputmode="decimal" autocomplete="off"
+               maxlength="20" aria-describedby="quote-amount-hint">
+        <p id="quote-amount-hint" class="hint" data-i18n="quote.amount_hint"></p>
+      </div>
+      <p id="quote-error" class="error" tabindex="-1" hidden></p>
+      <button id="quote-submit" type="submit" class="button primary" data-i18n="quote.submit"></button>
+    </form>
+  </div>
+
+  <div id="currency-step-quote" class="step" hidden>
+    <h2 id="quote-title" tabindex="-1" data-i18n="quote.title"></h2>
+    <div class="card">
+      <p id="quote-summary" class="strong"></p>
+      <p id="quote-rate"></p>
+      <p id="quote-until" class="muted"></p>
+      <p id="quote-left" class="timer" role="timer"></p>
+      <p id="quote-balance" class="muted small"></p>
+    </div>
+    <h3 data-i18n="order.title"></h3>
+    <form id="order-form" method="post" action="/" novalidate>
+      <div class="field">
+        <label for="order-name" data-i18n="order.name"></label>
+        <input id="order-name" name="beneficiary_name" type="text" autocomplete="off" maxlength="100">
+      </div>
+      <div class="field">
+        <label for="order-id" data-i18n="order.id"></label>
+        <input id="order-id" name="beneficiary_id" type="text" autocomplete="off" maxlength="100">
+      </div>
+      <p id="order-error" class="error" tabindex="-1" hidden></p>
+      <div class="actions">
+        <button id="order-submit" type="submit" class="button primary"></button>
+        <button id="order-new-price" type="button" class="button secondary" data-i18n="order.new_price"></button>
+        <button id="order-cancel" type="button" class="button secondary" data-i18n="order.cancel" hidden></button>
+      </div>
+    </form>
+  </div>
+
+  <div id="currency-step-receipt" class="step" hidden>
+    <h2 id="receipt-title" class="success-title" tabindex="-1" data-i18n="receipt.title"></h2>
+    <div class="card receipt">
+      <p class="label" data-i18n="receipt.code_label"></p>
+      <p id="receipt-code" class="receipt-code num"></p>
+      <p data-i18n="receipt.keep"></p>
+      <button id="receipt-copy" type="button" class="button secondary" data-i18n="receipt.copy"></button>
+      <p id="receipt-copied" class="muted small" role="status"></p>
+    </div>
+    <div class="card">
+      <p id="receipt-details"></p>
+      <p id="receipt-cost"></p>
+      <p id="receipt-status"></p>
+      <p id="receipt-balance" class="strong" hidden></p>
+    </div>
+    <div class="actions">
+      <a id="receipt-orders" class="button primary" href="#/orders" data-i18n="receipt.orders"></a>
+      <button id="receipt-new" type="button" class="button secondary" data-i18n="receipt.new"></button>
+    </div>
+  </div>
+</section>
+
+<section id="screen-orders" data-screen="orders" aria-labelledby="orders-title" hidden>
+  <div class="heading-row">
+    <h1 id="orders-title" tabindex="-1" data-i18n="orders.title"></h1>
+    <button id="orders-refresh" type="button" class="button small secondary" data-i18n="common.refresh"></button>
+  </div>
+  <p id="orders-error" class="error" tabindex="-1" hidden></p>
+  <ul id="orders-list" class="list" aria-busy="false"></ul>
+  <p id="orders-empty" class="empty" data-i18n="orders.empty" hidden></p>
+  <button id="orders-more" type="button" class="button secondary" data-i18n="common.more" hidden></button>
+</section>
+
+<section id="screen-account" data-screen="account" aria-labelledby="account-title" hidden>
+  <h1 id="account-title" tabindex="-1" data-i18n="account.title"></h1>
+  <dl class="card facts">
+    <div>
+      <dt data-i18n="account.name"></dt>
+      <dd id="account-name" class="strong"></dd>
+    </div>
+    <div>
+      <dt data-i18n="account.phone"></dt>
+      <dd id="account-phone" class="num"></dd>
+    </div>
+  </dl>
+
+  <h2 data-i18n="password.title"></h2>
+  <form id="password-form" method="post" action="/" novalidate>
+    <div class="field">
+      <label for="password-old" data-i18n="password.old"></label>
+      <input id="password-old" name="old_password" type="password" autocomplete="current-password"
+             maxlength="128">
+    </div>
+    <div class="field">
+      <label for="password-new" data-i18n="password.new"></label>
+      <input id="password-new" name="new_password" type="password" autocomplete="new-password"
+             maxlength="128" aria-describedby="password-new-hint">
+      <p id="password-new-hint" class="hint" data-i18n="setup.password_hint"></p>
+    </div>
+    <div class="field">
+      <label for="password-new2" data-i18n="password.new2"></label>
+      <input id="password-new2" name="new_password2" type="password" autocomplete="new-password"
+             maxlength="128">
+    </div>
+    <p id="password-error" class="error" tabindex="-1" hidden></p>
+    <p id="password-done" class="success" role="status" hidden></p>
+    <button id="password-submit" type="submit" class="button primary" data-i18n="password.submit"></button>
+  </form>
+
+  <div class="card logout">
+    <p id="account-error" class="error" tabindex="-1" hidden></p>
+    <button id="logout" type="button" class="button secondary" data-i18n="logout.this"></button>
+    <p class="muted small" data-i18n="logout.all_explain"></p>
+    <button id="logout-all" type="button" class="button danger-outline" data-i18n="logout.all"></button>
+    <div id="logout-all-confirm" class="confirm-box" role="group" aria-labelledby="logout-all-question" hidden>
+      <p id="logout-all-question" class="strong" tabindex="-1" data-i18n="logout.all_confirm"></p>
+      <div class="actions">
+        <button id="logout-all-yes" type="button" class="button danger" data-i18n="logout.all_yes"></button>
+        <button id="logout-all-no" type="button" class="button secondary" data-i18n="logout.all_no"></button>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<nav id="nav" class="nav" data-i18n-label="nav.label" hidden>
+  <a data-nav="home" href="#/home">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 11 12 3l9 8"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg>
+    <span data-i18n="nav.home"></span>
+  </a>
+  <a data-nav="send" href="#/send">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 3 3 10.5l7 3 3 7.5z"/><path d="M21 3 10 13.5"/></svg>
+    <span data-i18n="nav.send"></span>
+  </a>
+  <a data-nav="currency" href="#/currency">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M15 9.2c-.6-.8-1.6-1.2-3-1.2-1.7 0-3 .8-3 2.1 0 3 6 1.4 6 4.1 0 1.2-1.3 1.9-3 1.9-1.4 0-2.5-.5-3.2-1.4M12 6v2m0 8v2"/></svg>
+    <span data-i18n="nav.currency"></span>
+  </a>
+  <a data-nav="orders" href="#/orders">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
+    <span data-i18n="nav.orders"></span>
+  </a>
+  <a data-nav="account" href="#/account">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg>
+    <span data-i18n="nav.account"></span>
+  </a>
+</nav>
+
+</body>
+</html>
