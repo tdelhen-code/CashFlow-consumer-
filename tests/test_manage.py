@@ -71,6 +71,32 @@ class ManageTests(unittest.TestCase):
         self.assertEqual((status, self.admins()), (1, ["Huda"]))
         self.assertIn("already has an admin", err)
 
+    def test_the_first_admin_is_in_english_unless_told(self):
+        secret = "a long admin secret"
+        for n, (flags, language) in enumerate((([], "en"), (["--language", "ar"], "ar"),
+                                               (["--language", "fr"], "fr"))):
+            db = self.dir / f"wallet-{n}.db"
+            status, _, err = self.run_cli("first-admin", "--db", db, "--name", "Huda",
+                                          "--phone", "0910000000", *flags,
+                                          passwords=[secret, secret])
+            self.assertEqual(status, 0, err)
+            conn = A.connect(db)
+            try:
+                self.assertEqual(conn.execute("SELECT language FROM users").fetchone()[0],
+                                 language, flags)
+            finally:
+                conn.close()
+        db = self.dir / "wallet-de.db"
+        status, _, err = self.run_cli("first-admin", "--db", db, "--name", "Huda",
+                                      "--phone", "0910000000", "--language", "de",
+                                      passwords=[secret, secret])
+        self.assertEqual(status, 1)
+        self.assertIn("--language: invalid choice: 'de'", err)
+        self.assertFalse(db.exists())
+        status, out, _ = self.run_cli("first-admin", "--help")
+        self.assertEqual(status, 0)
+        self.assertIn("the admin's language: en (default), ar or fr", " ".join(out.split()))
+
     def test_first_admin_refusals_are_one_plain_line(self):
         for passwords, said in ((["a long admin secret", "another one entirely"], "not the same"),
                                 (["1234567890", "1234567890"], "error:")):

@@ -1,7 +1,7 @@
 """What the server does for the workers' screens (app/web.py): the page files
-and their headers, the Origin check, the token rule, and the API answers
-whose texts the screens rely on. The page tests serve small stand-in files
-from a temporary folder, never app/static itself."""
+and their headers, the Origin check, the token rule, the 'en' defaults, and
+the API answers whose texts the screens rely on. The page tests serve small
+stand-in files from a temporary folder, never app/static itself."""
 import contextlib
 import hashlib
 import http.client
@@ -689,6 +689,68 @@ class TokenTests(ScreensTestCase):
         self.assert_phone_app(setup(app), app)
 
 
+# ---------- English by default ----------
+
+class LanguageTests(ScreensTestCase):
+    def language(self, user_id, db_path=None):
+        conn = A.connect(db_path or self.db_path)
+        try:
+            return conn.execute("SELECT language FROM users WHERE id = ?",
+                                (user_id,)).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_new_users_get_english_by_default(self):
+        made = {}
+        for name, phone, language in (("Ali", "0911111111", None), ("Sam", "0922222222", ""),
+                                      ("Huda", "0933333333", "ar"), ("Rami", "0944444444", "fr"),
+                                      ("Lina", "0955555555", "en")):
+            body = {"name": name, "phone": phone}
+            if language is not None:
+                body["language"] = language
+            status, made[name] = self.admin.post("/api/admin/users", body)
+            self.assertEqual(status, 200, made[name])
+        users = {u["name"]: u["language"] for u in self.admin.get("/api/admin/users")[1]["users"]}
+        self.assertEqual(users, {"Admin": "en", "Ali": "en", "Sam": "en", "Huda": "ar",
+                                 "Rami": "fr", "Lina": "en"})
+        ali = Client(self.app, ip="10.0.3.1")
+        self.assertEqual(ali.post("/api/setup-password", {
+            "phone": "0911111111", "code": made["Ali"]["setup_code"],
+            "password": password("Ali")})[0], 200)
+        self.assertEqual(ali.get("/api/me")[1]["language"], "en")
+        status, answer = self.admin.post("/api/admin/users", {
+            "name": "Otto", "phone": "0912222222", "language": "de"})
+        self.assertEqual((status, answer), (400, {"error": "language must be one of ar, en, fr",
+                                                  "type": "LedgerError"}))
+        self.assertNotIn("Otto", {u["name"] for u in self.admin.get("/api/admin/users")[1]["users"]})
+
+    def test_the_code_defaults_are_english(self):
+        conn = A.connect(self.db_path)
+        self.addCleanup(conn.close)
+        self.assertEqual(self.language(L.create_user(conn, "customer", "Ali", "0911111111",
+                                                     admin_id=1)), "en")
+        new_db = str(self.dir / "new.db")
+        other = A.connect(new_db)
+        self.addCleanup(other.close)
+        admin = A.create_first_admin(other, "Huda", "0920000000", "Office-Pass-2026")
+        self.assertEqual(self.language(admin, new_db), "en")
+        self.assertEqual(L.LANGUAGES, ("ar", "en", "fr"))
+        # The table's own default is left as it was: it is never used (below).
+        self.assertIn("language TEXT NOT NULL DEFAULT 'ar'", L.SCHEMA)
+
+    def test_the_users_sql_default_is_never_used(self):
+        found = 0
+        for path in sorted((ROOT / "app").glob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            for match in re.finditer(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+users\b\s*(\(([^)]*)\))?",
+                                     source, re.IGNORECASE):
+                found += 1
+                self.assertIsNotNone(match.group(2), f"{path.name}: {match.group(0)!r} names "
+                                                     "no columns")
+                self.assertIn("language", match.group(2), f"{path.name}: {match.group(0)!r}")
+        self.assertGreaterEqual(found, 1)
+
+
 # ---------- the answers the screens match their texts to ----------
 
 class ErrorTextTests(ScreensTestCase):
@@ -911,6 +973,10 @@ class ReadmeTests(unittest.TestCase):
     def test_the_readme_names_every_page_path(self):
         for path in web.STATIC_FILES:
             self.assertIn(f"`{path}`", self.readme, path)
+
+    def test_the_readme_says_english_is_the_default(self):
+        self.assertIn("`en` (default)", self.readme)
+        self.assertNotIn("`ar` (default)", self.readme)
 
     def test_the_readme_states_the_origin_rule(self):
         for said in ("its `Origin` must be `https://` and the request's `Host` header",

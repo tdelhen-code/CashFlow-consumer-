@@ -590,7 +590,7 @@ def admin_create_user(app, conn, req):
     reason = req.get("reason", required=False) or "new account"
     user_id = L.create_user(conn, req.get("role", required=False) or "customer",
                             req.get("name"), req.get("phone"),
-                            req.get("language", required=False) or "ar",
+                            req.get("language", required=False) or "en",
                             admin_id=admin, whatsapp=req.get("whatsapp", required=False))
     code = A.issue_setup_code(conn, user_id, admin_id=admin, reason=reason)
     return {"id": user_id, "setup_code": code}

@@ -470,10 +470,15 @@ def _post(conn, kind, entries, created_by, note=None, reference=None,
 
 # ---------- users, tills ----------
 
-def create_user(conn, role, name, phone, language="ar", password_hash=None, *,
+def create_user(conn, role, name, phone, language="en", password_hash=None, *,
                 admin_id=None, whatsapp=None):
     """Only an admin can create users. The very first admin is created without one.
     `whatsapp` is only needed when it differs from the phone number."""
+    # The users table still says DEFAULT 'ar', in SCHEMA and in every existing
+    # database, but it is never used: this is the only place that adds a user,
+    # and it always names the language (a test checks every such statement).
+    # Changing the default in a database would need the table rebuilt, for no
+    # change in behaviour.
     phone = normalize_phone(phone)
     whatsapp = None if whatsapp is None else normalize_whatsapp(whatsapp)
     if whatsapp == phone:

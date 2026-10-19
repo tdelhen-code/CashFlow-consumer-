@@ -169,7 +169,8 @@ def _parser():
     _db(p)
     p.add_argument("--name", required=True)
     p.add_argument("--phone", required=True)
-    p.add_argument("--language", choices=L.LANGUAGES, default="ar")
+    p.add_argument("--language", choices=L.LANGUAGES, default="en",
+                   help="the admin's language: en (default), ar or fr")
     p.set_defaults(func=first_admin)
 
     p = commands.add_parser("backup", help="back up the database now")

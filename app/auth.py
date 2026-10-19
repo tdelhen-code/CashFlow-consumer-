@@ -242,7 +242,7 @@ def _dummy_hash():
 _dummy_hash()       # made now, so even the first unknown phone takes the usual time
 
 
-def create_first_admin(conn, name, phone, password, language="ar"):
+def create_first_admin(conn, name, phone, password, language="en"):
     """Set-up step: the very first admin, with their own password."""
     _check_password_rules(password, L.normalize_phone(phone))
     password_hash = hash_password(password)
