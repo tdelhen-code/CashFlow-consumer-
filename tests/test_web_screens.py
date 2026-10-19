@@ -253,9 +253,15 @@ class PageTests(ScreensTestCase):
                                         {"HTTP_IF_NONE_MATCH": got["ETag"]})
             self.assertEqual((status, body), (304, b""), path)
             self.assertNotIn("Content-Length", headers)
-        status, headers, body = raw(self.app, "HEAD", "/api/ping")       # the API: as before
-        self.assertEqual((status, json.loads(body)),
-                         (405, {"error": "method not allowed", "type": "http"}))
+        # The API's answers to HEAD: the status and headers they had, and no
+        # JSON, which a client reusing the connection would read as the next
+        # answer.
+        for path, status in (("/api/ping", 405), ("/api/me", 405), ("/nothing", 404),
+                             ("/index.html", 404)):
+            _, headers, json_body = raw(self.app, "POST" if status == 405 else "GET", path,
+                                        body=b"{}")
+            self.assertEqual(raw(self.app, "HEAD", path), (status, headers, b""), path)
+            self.assertEqual(headers["Content-Length"], str(len(json_body)), path)
 
     def test_other_methods_on_pages_are_not_allowed(self):
         # Refused before the body is read: no 415 for text/plain, no 413 for a
@@ -285,7 +291,7 @@ class PageTests(ScreensTestCase):
                      "/favicon.ico", "/robots.txt", "/static/secret.txt", "/static/sub/app.js",
                      "/app/web.py", "/web.py", "/send", "//", "/static/app.js;x"):
             self.assert_not_found(raw(app, "GET", path), path)
-            self.assertEqual(raw(app, "HEAD", path)[0], 404, path)
+            self.assertEqual(raw(app, "HEAD", path)[::2], (404, b""), path)
 
     def test_a_missing_page_file_is_not_found(self):
         (self.static / "app.js").unlink()
@@ -305,7 +311,7 @@ class PageTests(ScreensTestCase):
             for _ in range(3):
                 self.assert_not_found(raw(app, "GET", "/static/style.css"), "style.css")
                 self.assert_not_found(raw(app, "GET", "/static/app.js"), "app.js")
-                self.assertEqual(raw(app, "HEAD", "/static/app.js")[0], 404)
+                self.assertEqual(raw(app, "HEAD", "/static/app.js")[::2], (404, b""))
         lines = err.getvalue().splitlines()
         self.assertEqual(len(lines), 2, lines)
         self.assertEqual(lines[0], f"warning: {self.static / 'app.js'} is missing: "
@@ -440,6 +446,11 @@ class RealServerTests(ScreensTestCase):
             status, _, body = over_socket(port, "GET", path)
             self.assertEqual((status, json.loads(body)),
                              (404, {"error": "not found", "type": "http"}), path)
+        # An API answer to HEAD: headers only, so the connection can be reused.
+        for path, expected in (("/api/ping", 405), ("/nothing", 404)):
+            status, head, body = over_socket(port, "HEAD", path)
+            self.assertEqual((status, body, head["Cache-Control"]), (expected, b"", "no-store"),
+                             path)
 
     def assert_checks_the_origin(self, port):
         """The browser's Host header reaches the app as it was sent."""

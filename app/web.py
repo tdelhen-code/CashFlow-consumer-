@@ -24,9 +24,10 @@ Rules every request follows:
   frame) and `Cache-Control: no-cache` with an ETag: a browser keeps them and
   asks each time whether they changed (304 when they didn't). They hold no
   private data and need no database. Every other path is the API's.
-- API requests and responses are JSON, and no answer is stored by a browser
-  or proxy (no-store). POST bodies must be sent as application/json, which a
-  form on another website can't do.
+- API requests and responses are JSON (an answer to HEAD has the headers
+  only), and no answer is stored by a browser or proxy (no-store). POST
+  bodies must be sent as application/json, which a form on another website
+  can't do.
 - A request that can change something (any method but GET and HEAD) is
   refused with a 403, before its body is read, when a browser sent it from
   another website: its Origin, when it has one, must be this site,
@@ -994,7 +995,8 @@ class App:
         cookie = None
         self._check_forwarded_for(environ)
         path = environ.get("PATH_INFO", "/")
-        reads = environ["REQUEST_METHOD"] in ("GET", "HEAD")
+        head = environ["REQUEST_METHOD"] == "HEAD"
+        reads = head or environ["REQUEST_METHOD"] == "GET"
         try:
             # The screens first: no Origin check, no body read, no database.
             # A listed file that was missing at start goes on to the routes:
@@ -1032,9 +1034,12 @@ class App:
         except Exception:
             traceback.print_exc(file=sys.stderr)
             status, body = 500, {"error": "internal error", "type": "internal"}
-        return self._respond(start_response, status, body, cookie)
+        return self._respond(start_response, status, body, cookie, head)
 
-    def _respond(self, start_response, status, body, cookie):
+    def _respond(self, start_response, status, body, cookie, head=False):
+        """The JSON answer. For HEAD, the same status and headers without the
+        JSON: neither waitress nor the bundled server leaves it out, and a
+        client that reuses the connection would read it as the next answer."""
         data = json.dumps(body, ensure_ascii=False, default=str).encode()
         headers = [
             ("Content-Type", "application/json; charset=utf-8"),
@@ -1054,7 +1059,7 @@ class App:
             headers.append(("Set-Cookie", "; ".join(parts)))
         phrase = HTTPStatus(status).phrase
         start_response(f"{status} {phrase}", headers)
-        return [data]
+        return [] if head else [data]
 
 
 def make_app(db_path, **options):
