@@ -1,5 +1,6 @@
 """The deploy files and the owner's guides: what they run, and what they tell
 the owner to type."""
+import fnmatch
 import io
 import json
 import os
@@ -297,11 +298,41 @@ class GuideTests(unittest.TestCase):
         for advice in ("Autologon", "active hours", "Restore on AC power loss", "healthchecks.io"):
             self.assertIn(advice, own)
 
-    def test_the_guide_says_there_are_no_screens_yet(self):
-        self.assertIn("The wallet has no screens yet", self.section(1))
+    def test_the_guide_says_which_screens_there_are(self):
+        intro = flat(between(self.hosting, "The wallet runs the same way", "\n## 1."))
+        self.assertIn("(the workers' screens and the API; the admin screens are still to come)",
+                      intro)
+        where = flat(self.section(1))
+        self.assertIn("The workers' screens are at the wallet's address", where)
+        self.assertIn("The admin screens are still to come", where)
+        self.assertNotIn("no screens yet", self.hosting)
         self.assertNotIn("look at a few balances", self.hosting)
         self.assertIn("python3 -m app.manage check --db test.db", commands(self.hosting))
         self.assertIn("for now an API call with an admin's login", flat(self.section(7)))
+
+    def test_the_tunnel_keeps_the_address_and_the_page_as_they_are(self):
+        # The wallet refuses a browser's request whose Host is not the address
+        # the browser opened, and its page refuses scripts added on the way.
+        own = flat(self.section(3))
+        for said in ("*HTTP Host Header*", "*Rocket Loader*", "*Web Analytics*"):
+            self.assertIn(said, own)
+
+
+class ImageTests(unittest.TestCase):
+    def test_the_image_ships_the_screens(self):
+        # app/static is in the image only through `!app/` and `COPY app/ app/`:
+        # a slimmer ignore file would ship an image whose / is a JSON 404.
+        patterns = [line.strip() for line in read(".dockerignore").splitlines()
+                    if line.strip() and not line.startswith("#")]
+        self.assertIn("!app/", patterns)
+        for pattern in patterns[patterns.index("!app/") + 1:]:     # later lines win
+            if pattern.startswith("!"):
+                continue
+            for path in ("app/static", "app/static/index.html", "app/static/app.js"):
+                self.assertFalse(fnmatch.fnmatchcase(path,
+                                                     pattern.rstrip("/").replace("**", "*")),
+                                 (pattern, path))
+        self.assertIn("COPY app/ app/", read("Dockerfile").splitlines())
 
 
 if __name__ == "__main__":

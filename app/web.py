@@ -1,6 +1,9 @@
-"""JSON web API over HTTP, as a WSGI app (standard library only).
+"""The workers' screens and the JSON web API over HTTP, as a WSGI app (standard
+library only).
 
 Run locally:      python3 -m app.web --db wallet.db --port 8000 --insecure-cookies
+                  (then open http://127.0.0.1:8000/; without --insecure-cookies
+                  the screens' requests over plain http are refused)
 In production:    python3 -m app.serve (app/serve.py): this app on waitress in
                   one process, behind HTTPS (Caddy), with the hourly check and
                   backups; deploy/ sets it all up with Docker. Served another
@@ -11,14 +14,37 @@ In production:    python3 -m app.serve (app/serve.py): this app on waitress in
                   address) and trusted_proxy_headers="x-forwarded-for".
 
 Rules every request follows:
-- Requests and responses are JSON. POST bodies must be sent as
-  application/json, which a form on another website can't do, so a logged-in
-  browser can't be tricked into sending money (with the SameSite cookie).
+- The workers' screens are one page at / and four files under /static/
+  (STATIC_FILES), read from app/static once at start, so a changed file needs
+  a restart. The request's path is only looked up in that list, never joined
+  to a folder. They answer GET and HEAD only (any other method is a 405),
+  with a strict Content-Security-Policy (PAGE_CSP: the page's own files and
+  API only, no inline script or style, no native form submit, never inside
+  another site's frame) and `Cache-Control: no-cache` with an ETag: a browser
+  keeps them and asks each time whether they changed (304 when they didn't).
+  They hold no private data and need no database. Every other path is the
+  API's.
+- API requests and responses are JSON, and no answer is stored by a browser
+  or proxy (no-store). POST bodies must be sent as application/json, which a
+  form on another website can't do.
+- A request that can change something (any method but GET and HEAD) is
+  refused with a 403, before its body is read, when a browser sent it from
+  another website: its Origin, when it has one, must be this site,
+  https://<the Host header> (http:// too with --insecure-cookies), and without
+  one its Sec-Fetch-Site must not say same-site or cross-site. The SameSite
+  cookie alone would let a page on another port or subdomain of the same site
+  send it with the session. A request with an `Authorization: Bearer` token is
+  not checked: a page can't add that header to a request to another site
+  (that needs a CORS answer, which this server never gives).
 - The session is the `__Host-session` cookie (HttpOnly, Secure,
   SameSite=Strict; plain `session` with --insecure-cookies) or an
   `Authorization: Bearer <token>` header for a phone app. Browsers take a
   `__Host-` cookie only from this very host, so another subdomain can't plant
   one; two different session cookies in a request count as none.
+- Login and setup-password give the session's token in their JSON answer only
+  to a client that isn't a browser (no Origin and no Sec-Fetch-Site: a phone
+  app). A browser gets only the HttpOnly cookie, so no script on the page can
+  read the session.
 - Amounts are typed text in LYD ("12.5"); answers carry dirhams and LYD text.
   Text fields must be JSON strings, at most MAX_TEXT characters; an optional
   field sent blank counts as left out.
@@ -29,6 +55,7 @@ Rules every request follows:
   unexpected errors say only "internal error" and are logged on the server.
 """
 import argparse
+import hashlib
 import io
 import ipaddress
 import json
@@ -41,6 +68,7 @@ import traceback
 from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from http import HTTPStatus
+from pathlib import Path
 from urllib.parse import parse_qs
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
@@ -59,6 +87,44 @@ DEV_SERVER_THREADS = 8
 COOKIE = "session"                  # only with secure_cookies=False (plain http)
 SECURE_COOKIE = "__Host-session"    # can't be set from another subdomain or path
 MAX_ID = 2**63 - 1                  # the largest whole number the database stores
+
+# The workers' screens: each URL path and its file in STATIC_DIR. Only these
+# are served; nothing else in the folder is ever read.
+STATIC_DIR = Path(__file__).with_name("static")
+STATIC_FILES = {
+    "/": "index.html",
+    "/static/app.js": "app.js",
+    "/static/strings.js": "strings.js",
+    "/static/style.css": "style.css",
+    "/static/icon.svg": "icon.svg",
+}
+# Fixed here, not taken from the system's table, which can say text/plain for
+# .js (on Windows).
+STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
+# The screens' policy: scripts, styles, images and requests only from this
+# site's own files and API; no inline script or style; no native form submit
+# (the page sends everything with fetch); never inside another page's frame.
+# Trusted Types make the browser refuse innerHTML and the other HTML sinks.
+PAGE_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
+            "connect-src 'self'; form-action 'none'; base-uri 'none'; "
+            "frame-ancestors 'none'; require-trusted-types-for 'script'; "
+            "trusted-types 'none'")
+PAGE_HEADERS = (
+    ("Content-Security-Policy", PAGE_CSP),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
+)
+# The 403 for a request sent from another website (App._check_origin).
+ORIGIN_REFUSED = "refused: sent from another website"
 
 # Longest text accepted per field, in characters; any other text field is at
 # most MAX_OTHER_TEXT. The one place these limits are checked (Request.get).
@@ -147,6 +213,49 @@ def client_key(ip):
     return str(address)
 
 
+# ---------- where a request comes from ----------
+
+def _bearer(environ):
+    """The token of an `Authorization: Bearer <token>` header, or None when
+    there is no such header. The one test of whether a request carries a
+    Bearer token: Request.token acts with it, and App._check_origin lets such a
+    request through, so a request can't skip the check and act with the cookie."""
+    header = environ.get("HTTP_AUTHORIZATION", "")
+    return header[7:].strip() if header.startswith("Bearer ") else None
+
+
+def _same_origin(origin, host, schemes):
+    """Whether a browser's Origin header is this site: one of `schemes`, then
+    the request's Host exactly, a default port (:443, :80) written or not.
+    A plain comparison, with no URL parsing, so nothing can be slipped past
+    it: null, a path, user info, another port or scheme, or no Host never
+    match."""
+    origin, host = origin.strip().lower(), host.strip().lower()
+    if not host:
+        return False
+    for scheme in schemes:
+        default = ":443" if scheme == "https" else ":80"
+        if origin.removesuffix(default) == f"{scheme}://{host.removesuffix(default)}":
+            return True
+    return False
+
+
+def _from_browser(environ):
+    """Whether a browser sent the request: every current one sends Origin or
+    Sec-Fetch-Site with a fetch() POST, and a phone app's HTTP client neither."""
+    return "HTTP_ORIGIN" in environ or "HTTP_SEC_FETCH_SITE" in environ
+
+
+def _etag_matches(header, etag):
+    """Whether an If-None-Match header names `etag`, or is *. A tag counts
+    with or without W/ (weak), which a proxy that compresses the file adds."""
+    for tag in header.split(","):
+        tag = tag.strip()
+        if tag == "*" or tag.removeprefix("W/") == etag:
+            return True
+    return False
+
+
 # ---------- fields of a JSON body ----------
 
 def _text(name, value, required=True):
@@ -228,9 +337,9 @@ class Request:
 
     @property
     def token(self):
-        header = self.environ.get("HTTP_AUTHORIZATION", "")
-        if header.startswith("Bearer "):
-            return header[7:].strip()
+        bearer = _bearer(self.environ)
+        if bearer is not None:
+            return bearer
         # Read by hand: SimpleCookie stops at the first cookie it can't parse
         # (another app's JSON, a value with a space), losing ours after it.
         # Two different values mean one was planted (browsers send a cookie
@@ -353,12 +462,21 @@ def ping(app, conn, req):
     return {"ok": True}
 
 
+def _logged_in(req, token):
+    """The answer to a login or setup-password that worked, with the session
+    cookie. The token is in the JSON too only for a client that isn't a browser
+    (a phone app keeps it for its Bearer header). A browser has the cookie,
+    which no script on the page can read; the token in the answer could be read
+    by any script that sees it, and would work from anywhere for a week."""
+    return ({"ok": True} if _from_browser(req.environ) else {"ok": True, "token": token}), token
+
+
 @route("POST", "/api/login")
 def login(app, conn, req):
     phone, password = req.get("phone"), req.get("password")
     token = _login_try(app, req, A._login_phone(phone) or phone,
                        lambda client: A.login(conn, phone, password, client=client))
-    return {"ok": True, "token": token}, token
+    return _logged_in(req, token)
 
 
 @route("POST", "/api/setup-password")
@@ -367,7 +485,7 @@ def setup_password(app, conn, req):
     token = _login_try(app, req, A._login_phone(phone) or phone,
                        lambda client: A.set_password_with_code(conn, phone, code, password,
                                                                client=client))
-    return {"ok": True, "token": token}, token
+    return _logged_in(req, token)
 
 
 @route("POST", "/api/logout")
@@ -746,12 +864,36 @@ def admin_log(app, conn, req):
 
 # ---------- the app ----------
 
+def _read_static(static_dir):
+    """Each STATIC_FILES file, read once: {URL path: (body, content type, ETag)}.
+    A file that can't be read is left out, so its path answers 404, and is
+    named on stderr, so a broken install shows in the log."""
+    files = {}
+    for path, name in STATIC_FILES.items():
+        file = Path(static_dir) / name
+        try:
+            body = file.read_bytes()
+        except OSError as e:
+            said = "is missing" if isinstance(e, FileNotFoundError) else \
+                f"can't be read ({e.strerror or e})"
+            print(f"warning: {file} {said}: the screens won't load", file=sys.stderr)
+            continue
+        etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+        files[path] = (body, STATIC_TYPES[file.suffix], etag)
+    return files
+
+
 class App:
     def __init__(self, db_path, *, secure_cookies=True, trust_proxy=False,
-                 login_limiter=None, account_limiter=None, worker_limiter=None):
+                 login_limiter=None, account_limiter=None, worker_limiter=None,
+                 static_dir=STATIC_DIR):
         self.db_path = db_path
         self.secure_cookies = secure_cookies
         self.cookie_name = SECURE_COOKIE if secure_cookies else COOKIE
+        # What a browser's Origin may start with: plain http only for local
+        # testing, where the cookie is allowed over it too.
+        self.origin_schemes = ("https",) if secure_cookies else ("https", "http")
+        self.static = _read_static(static_dir)  # editing a file needs a restart
         self.trust_proxy = trust_proxy
         self.login_limiter = login_limiter or RateLimiter(LOGIN_TRIES_PER_IP,
                                                           LOGIN_WINDOW_SECONDS)
@@ -795,10 +937,59 @@ class App:
                   "waitress: trusted_proxy=<the proxy's address>, "
                   "trusted_proxy_headers='x-forwarded-for')", file=sys.stderr)
 
+    def _check_origin(self, environ):
+        """Refuse (403) a request that can change something when a browser sent
+        it from another website, before its body is read. Called for every
+        method but GET and HEAD.
+        - With a Bearer token: not checked. That token is what the request acts
+          with, and a page on another site can't add the header without a CORS
+          answer, which this server never gives.
+        - With an Origin: it must be this site (_same_origin), with or without
+          a cookie, so a login from another site is refused too.
+        - Without one: every current browser sends Origin with a POST, so this
+          is a program holding whatever cookie it sends, unless Sec-Fetch-Site
+          says the request came from another site.
+        "This site" is the Host header, which Caddy and Cloudflare's tunnel
+        pass on as the browser sent it; never X-Forwarded-Host, which anyone
+        could send to the bundled server."""
+        if _bearer(environ) is not None:
+            return
+        origin = environ.get("HTTP_ORIGIN")
+        if origin is not None:
+            if not _same_origin(origin, environ.get("HTTP_HOST", ""), self.origin_schemes):
+                raise HttpError(403, ORIGIN_REFUSED)
+        elif environ.get("HTTP_SEC_FETCH_SITE", "none").strip().lower() \
+                not in ("same-origin", "none"):
+            raise HttpError(403, ORIGIN_REFUSED)
+
+    def _static(self, environ, start_response, entry):
+        """A page file, for GET or HEAD: 200 with it, or 304 with no body when
+        the browser's copy is this one (If-None-Match). HEAD gets the same
+        status and headers, and no body. Never a cookie."""
+        body, content_type, etag = entry
+        headers = [("Cache-Control", "no-cache"), ("ETag", etag), *PAGE_HEADERS]
+        if _etag_matches(environ.get("HTTP_IF_NONE_MATCH", ""), etag):
+            start_response("304 Not Modified", headers)
+            return []
+        start_response("200 OK", [("Content-Type", content_type),
+                                  ("Content-Length", str(len(body))), *headers])
+        return [] if environ["REQUEST_METHOD"] == "HEAD" else [body]
+
     def __call__(self, environ, start_response):
         cookie = None
         self._check_forwarded_for(environ)
+        path = environ.get("PATH_INFO", "/")
+        reads = environ["REQUEST_METHOD"] in ("GET", "HEAD")
         try:
+            # The screens first: no Origin check, no body read, no database.
+            # A listed file that is missing goes on to the routes: a 404.
+            entry = self.static.get(path)
+            if entry is not None and reads:
+                return self._static(environ, start_response, entry)
+            if not reads:
+                if path in STATIC_FILES:
+                    raise HttpError(405, "method not allowed")  # the body is never read
+                self._check_origin(environ)
             req = Request(environ, self.trust_proxy, self.cookie_name)
             for method, regex, handler in ROUTES:
                 match = regex.match(req.path)
@@ -939,18 +1130,21 @@ def dev_server(app, host="127.0.0.1", port=8000):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="LYD wallet API server (development)")
+    parser = argparse.ArgumentParser(
+        description="LYD wallet: the workers' screens and the API (development server)")
     parser.add_argument("--db", default="wallet.db")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--insecure-cookies", action="store_true",
-                        help="allow the session cookie over plain http (local testing only)")
+                        help="allow the session cookie and the screens over plain http "
+                             "(local testing only)")
     parser.add_argument("--trust-proxy", action="store_true",
                         help="take the client address from X-Forwarded-For")
     args = parser.parse_args(argv)
     app = App(args.db, secure_cookies=not args.insecure_cookies, trust_proxy=args.trust_proxy)
     with dev_server(app, args.host, args.port) as server:
-        print(f"LYD wallet API on http://{args.host}:{args.port} (database {args.db})")
+        print(f"LYD wallet on http://{args.host}:{args.port}/ (the workers' screens; "
+              f"API under /api/; database {args.db})")
         server.serve_forever()
 
 

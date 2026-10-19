@@ -1,7 +1,8 @@
 # LYD wallet (Al Naseem workers)
 
-Backend core for a web app where workers hold LYD balances, send LYD to each
-other, and order foreign currency paid from their balance.
+A web app where workers hold LYD balances, send LYD to each other, and order
+foreign currency paid from their balance: the backend, and the workers'
+screens (in English for now; see "Screens" below).
 
 - `app/ledger.py`: balances, payroll, deposits, transfers, cash withdrawal with
   commission, bank and till accounts, reversals, admin log, hourly checks and
@@ -163,6 +164,15 @@ waitress, see below). Run the tests from this folder:
 
     python3 -m unittest
 
+The browser tests (`tests/test_browser.py`) use the screens in Chromium
+through Playwright; without Playwright they are skipped. To run them, put
+Playwright in a virtual environment; they use the Chromium at
+`/opt/pw-browsers/chromium`, or the one `WALLET_TEST_CHROMIUM` names:
+
+    python3 -m venv .venv
+    .venv/bin/pip install playwright
+    .venv/bin/python -m unittest tests.test_browser
+
 The database keeps the version of its tables (`ledger.SCHEMA_VERSION`, in
 SQLite's `user_version`): a new one is stamped with it, one from an earlier
 version is upgraded when it is opened (`ledger.MIGRATIONS`, all in one write,
@@ -171,9 +181,15 @@ or not at all), and one from a newer version of the app is refused
 
 ## Web API (`app/web.py`)
 
-Run it locally (plain http, so the cookie is allowed without HTTPS):
+Run it locally (plain http, so the cookie is allowed without HTTPS), then
+open `http://127.0.0.1:8000/` for the workers' screens:
 
     python3 -m app.web --db wallet.db --port 8000 --insecure-cookies
+
+The screens need `--insecure-cookies` on plain http: without it the wallet
+takes only requests from an `https://` page (see "Requests from other
+websites" below), so it refuses every login and every other request of the
+screens that changes something.
 
 The bundled server handles requests on 8 threads, each keeping its database
 connection from one request to the next, and lets go of a client that sends
@@ -198,7 +214,53 @@ cookie `__Host-session` (plain `session` with `--insecure-cookies`), found among
 any other cookies the browser sends, or `Authorization: Bearer <token>`. A
 browser takes a `__Host-` cookie only from this very host, so another subdomain
 can't plant one; a request with two different session cookies counts as not
-logged in.
+logged in. `/api/login` and `/api/setup-password` set the cookie and answer
+`{"ok": true}`. They add the session's `token` to that answer only to a client
+that sends neither `Origin` nor `Sec-Fetch-Site` (a phone app, which then
+sends it as `Authorization: Bearer <token>`). A browser gets only the cookie,
+which no script on the page can read, so a script that sees the answer can't
+take the session away with it.
+
+Screens: the workers' screens are one page at `/` and four files,
+`/static/app.js`, `/static/strings.js`, `/static/style.css` and
+`/static/icon.svg`, from the folder `app/static/`. A worker opens the wallet's
+address on their phone and logs in. The page then uses the Workers and
+Everyone routes below, and moves between its screens with the part of the
+address after `#` (`/#/send`). They are in English for now. Every text they
+show is in `app/static/strings.js`, one block per language. To add Arabic or
+French, copy the `en` block as `ar` or `fr`, translate its texts (keeping the
+keys and the `{name}`-style placeholders) and set its `meta.dir` (`rtl` for
+Arabic). Each worker then sees the language of their account (`language`),
+and English for a text that is missing. The five files are read once when the
+server starts, so a changed file needs a restart; one missing then is named in
+the log (`warning: ... is missing: the screens won't load`) and its path
+answers 404. They are served with a strict `Content-Security-Policy` (only
+the page's own files and API, no inline script or style, no native form
+submit, never inside another site's frame), `X-Frame-Options: DENY`,
+`nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-cache` with
+an `ETag`: a browser keeps them and asks each time whether they changed (a
+304 when they didn't), so an update shows at once. `HEAD` gets the same
+headers without the file, and any other method is a 405. Any other path
+outside the API (`/index.html`, `/favicon.ico`, `/send`, ...) is a JSON 404,
+like an unknown API path. API answers are never stored
+(`Cache-Control: no-store`).
+
+Requests from other websites: a request that can change something (any
+method but `GET` and `HEAD`) and that a browser sends from another website is
+refused with a 403 (`refused: sent from another website`) before its body is
+read. A browser says where a request comes from: its `Origin` must be
+`https://` and the request's `Host` header (`http://` too with
+`--insecure-cookies`), and without an `Origin`, `Sec-Fetch-Site` must not be
+`same-site` or `cross-site`. The SameSite cookie alone would let a page on
+another port or subdomain of the same domain send such a request with the
+worker's session. This also refuses a login from another website. A request
+with `Authorization: Bearer` is not checked (a page can't add that header to
+a request to another site), nor one with neither header (a phone app, curl),
+which acts only with what it sends itself. "This site" is the `Host` header,
+never `X-Forwarded-Host`, so a proxy in front must pass on the `Host` the
+browser sent. Caddy and Cloudflare's tunnel do that unless told otherwise;
+with nginx, add `proxy_set_header Host $http_host;` (not `$host`, which drops
+a port such as `:8443`).
 
 Limits (429 when reached). They are kept in memory, per server process: run
 one process (waitress, or `gunicorn -w 1 --threads 8`), or also limit at the
@@ -234,14 +296,14 @@ type or too long, or a rule not met, such as a currency that isn't offered, a
 supplier switched off, an order that is already paid or cancelled, or an
 idempotency key reused with other details), 401 (log in; also a wrong or unknown login, a locked one, or a
 session ended by blocking, deactivating or a new setup code), 403 (not allowed /
-blocked: a worker on an admin route or an admin on a worker's one, a blocked
+blocked: a request from another website, a worker on an admin route or an admin on a worker's one, a blocked
 user logging in, a blocked worker's order, an admin blocked or deactivated
 while their request was under way; `WrongPassword` for a wrong current password
 on change-password, which doesn't log out), 404 (no such user, worker account (also a closed worker's),
 bank or till, supplier, order, quote (also another worker's), receipt code,
 transaction or path; also a colleague to send to who is blocked or closed, like
 an unknown number), 405 (a known path with another method, such as
-`GET /api/login`), 409 (balance, cash, quote expired or price corrected,
+`GET /api/login`, or a `POST` to a page), 409 (balance, cash, quote expired or price corrected,
 already exists (a till, currency, supplier, or a phone number already
 registered), payroll batch already posted, quote already used for another
 beneficiary, order already with a supplier (to assign or cancel it, unassign
@@ -264,7 +326,7 @@ missing key (where required) or a blank one is a 400.
 | | |
 |---|---|
 | Everyone | `GET /api/ping` (no login: `{"ok": true}` if the server and its database answer, for health checks); `POST /api/login` (`{phone, password}`), `/api/setup-password` (`{phone, code, password}`), `/api/logout` (this session), `/api/logout-everywhere` (every session of this user), `/api/change-password` (`{old_password, new_password}`; ends the other sessions) |
-| Workers | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id}`) |
+| Workers (what the workers' screens use, with the Everyone routes) | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id}`) |
 | Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&kind=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; all filters optional; `kind` is `user`, `order`, `transaction`, `supplier` or `code`); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `ar` (default), `en` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
 | Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` (the checks' `problems`, what is owed and held, and `maintenance`: see below) |
 | Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/active` (`{active: true/false, reason}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?, rate?}`; an order without a supplier needs `supplier_id`, and `rate` is a one-off rate for it); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
@@ -362,5 +424,5 @@ or order checks found problems.
   database answer, for the proxy's and the container's health checks.
 
 Not built yet: suppliers paid in foreign currency instead of LYD, approvals
-(such as a second admin approving a reset of an admin's account), screens
-(Arabic, English, French).
+(such as a second admin approving a reset of an admin's account), the admin
+screens, and the workers' screens in Arabic and French.

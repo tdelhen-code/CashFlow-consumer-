@@ -7,8 +7,8 @@ commands alone are in [deploy/README.md](../deploy/README.md).
 The wallet runs the same way on any computer with Docker:
 
 - **the app**, which checks the books every hour and makes a backup every hour;
-- **Caddy** in front of it, which gives the HTTPS address workers will open
-  (for now only the API answers there: the screens are still to come);
+- **Caddy** in front of it, which gives the HTTPS address workers open
+  (the workers' screens and the API; the admin screens are still to come);
 - **Cloudflare Tunnel**, only when the wallet runs on a computer at home or in
   the office.
 
@@ -33,11 +33,14 @@ not slower for workers.
 Your own computer is reasonable for trying the wallet out, or for a few
 workers while you decide.
 
-The wallet has no screens yet. For now only its API, which the screens will
-use, answers at its address: a browser that opens it shows
-`{"error": "not found", "type": "http"}`. The screens for workers and admins
-(Arabic, English, French) are still to come. You can already set up the
-hosting and the backups.
+The workers' screens are at the wallet's address: a worker opens
+`https://<your address>/` on their phone, logs in with their phone number and
+password, and sees their balance and activity, sends money to a colleague,
+orders currency and changes their password. They are in English for now;
+Arabic and French come later. The admin screens are still to come: until then
+admins use the API (an admin who logs in on the workers' screens is told they
+are for workers' accounts). You can already set up the hosting and the
+backups.
 
 Check whether Libyan rules (for example the Central Bank of Libya's) apply to
 holding workers' money and personal data.
@@ -90,7 +93,8 @@ holding workers' money and personal data.
        docker compose exec app manage first-admin --name "Your name" --phone "091 000 0000"
 
 8. **Check it.** Open `https://wallet.example.com/api/ping`; it should show
-   `{"ok": true}`.
+   `{"ok": true}`. `https://wallet.example.com/` should show the workers'
+   login screen.
 9. **Set up the off-site backups and both alerts** (section 4). Don't skip
    this.
 
@@ -121,6 +125,13 @@ holding workers' money and personal data.
    - create a tunnel of the *cloudflared* kind, and copy its **token**;
    - add a public hostname such as `wallet.example.com`, with the service
      `http://caddy:80`.
+
+   Leave the public hostname's *HTTP Host Header* setting (under its
+   additional settings) empty: the wallet refuses a browser's request that
+   doesn't arrive with the address the browser opened. Keep *Rocket Loader*
+   off and don't turn on automatic *Web Analytics* for this hostname: they
+   add scripts to the page, which the wallet's page refuses (with Rocket
+   Loader the screens stay blank).
 
    Cloudflare gives the HTTPS. The tunnel works because Cloudflare decrypts
    the traffic on its way through, so this means trusting Cloudflare with it.
@@ -153,8 +164,9 @@ holding workers' money and personal data.
 7. **Create the first admin and check it**, as in steps 7 and 8 of section 2.
 
 To try it on this computer only, without a domain, set `SITE_ADDRESS=localhost`
-and open `https://localhost/api/ping`. The browser warns about the
-certificate, because it is Caddy's own.
+and open `https://localhost/api/ping`, then `https://localhost/` for the
+workers' screens. The browser warns about the certificate, because it is
+Caddy's own.
 
 ## 4. Backups
 
@@ -443,6 +455,10 @@ upgrade, restore the backup taken just before it.
   more than two hours and ten minutes). The same is in the `PROBLEM` lines of
   the log.
 - Free disk space, with `df -h` on Linux.
+- After an update, open the wallet's address: it should show the workers'
+  login screen. If it shows `{"error": "not found", "type": "http"}`
+  instead, the screens' files are missing; the start of the app's log
+  (`docker compose logs app`) names each one with `the screens won't load`.
 
 ## Without Docker
 
