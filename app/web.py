@@ -16,14 +16,14 @@ In production:    python3 -m app.serve (app/serve.py): this app on waitress in
 Rules every request follows:
 - The workers' screens are one page at / and four files under /static/
   (STATIC_FILES), read from app/static once at start, so a changed file needs
-  a restart. The request's path is only looked up in that list, never joined
-  to a folder. They answer GET and HEAD only (any other method is a 405),
-  with a strict Content-Security-Policy (PAGE_CSP: the page's own files and
-  API only, no inline script or style, no native form submit, never inside
-  another site's frame) and `Cache-Control: no-cache` with an ETag: a browser
-  keeps them and asks each time whether they changed (304 when they didn't).
-  They hold no private data and need no database. Every other path is the
-  API's.
+  a restart, and one missing then answers 404 and is named on stderr. The
+  request's path is only looked up in that list, never joined to a folder.
+  They answer GET and HEAD only (any other method is a 405), with a strict
+  Content-Security-Policy (PAGE_CSP: the page's own files and API only, no
+  inline script or style, no native form submit, never inside another site's
+  frame) and `Cache-Control: no-cache` with an ETag: a browser keeps them and
+  asks each time whether they changed (304 when they didn't). They hold no
+  private data and need no database. Every other path is the API's.
 - API requests and responses are JSON, and no answer is stored by a browser
   or proxy (no-store). POST bodies must be sent as application/json, which a
   form on another website can't do.
@@ -865,22 +865,21 @@ def admin_log(app, conn, req):
 # ---------- the app ----------
 
 def _read_static(static_dir):
-    """Each STATIC_FILES file, read once: {URL path: (body, content type, ETag)}.
-    A file that can't be read is left out, so its path answers 404, and is
-    named on stderr, so a broken install shows in the log."""
-    files = {}
+    """Each STATIC_FILES file, read once: {URL path: (body, content type, ETag)},
+    and a list that says what is wrong with each file that couldn't be read.
+    Such a file is left out, so its path answers 404."""
+    files, missing = {}, []
     for path, name in STATIC_FILES.items():
         file = Path(static_dir) / name
         try:
             body = file.read_bytes()
         except OSError as e:
-            said = "is missing" if isinstance(e, FileNotFoundError) else \
-                f"can't be read ({e.strerror or e})"
-            print(f"warning: {file} {said}: the screens won't load", file=sys.stderr)
+            missing.append(f"{file} is missing" if isinstance(e, FileNotFoundError)
+                           else f"{file} can't be read ({e.strerror or e})")
             continue
         etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
         files[path] = (body, STATIC_TYPES[file.suffix], etag)
-    return files
+    return files, missing
 
 
 class App:
@@ -893,7 +892,10 @@ class App:
         # What a browser's Origin may start with: plain http only for local
         # testing, where the cookie is allowed over it too.
         self.origin_schemes = ("https",) if secure_cookies else ("https", "http")
-        self.static = _read_static(static_dir)  # editing a file needs a restart
+        # Editing a page file needs a restart. Those that couldn't be read are
+        # named on stderr by warn_missing_pages().
+        self.static, self.missing_pages = _read_static(static_dir)
+        self.warned_missing_pages = False
         self.trust_proxy = trust_proxy
         self.login_limiter = login_limiter or RateLimiter(LOGIN_TRIES_PER_IP,
                                                           LOGIN_WINDOW_SECONDS)
@@ -936,6 +938,19 @@ class App:
                   "counts for that address; make the proxy set the header (with "
                   "waitress: trusted_proxy=<the proxy's address>, "
                   "trusted_proxy_headers='x-forwarded-for')", file=sys.stderr)
+
+    def warn_missing_pages(self):
+        """Name on stderr, once, each page file that couldn't be read at start,
+        so that a broken install (an image without app/static) shows in the
+        log. Not when the app is made: the server's own first line, or its
+        error such as an address it can't listen on, comes first. The bundled
+        server (main) calls this right after its first line; under any other
+        server, such as app.serve's waitress, the first request for a page
+        file that isn't there does."""
+        if self.missing_pages and not self.warned_missing_pages:
+            self.warned_missing_pages = True
+            for problem in self.missing_pages:
+                print(f"warning: {problem}: the screens won't load", file=sys.stderr)
 
     def _check_origin(self, environ):
         """Refuse (403) a request that can change something when a browser sent
@@ -982,10 +997,13 @@ class App:
         reads = environ["REQUEST_METHOD"] in ("GET", "HEAD")
         try:
             # The screens first: no Origin check, no body read, no database.
-            # A listed file that is missing goes on to the routes: a 404.
+            # A listed file that was missing at start goes on to the routes:
+            # a 404.
             entry = self.static.get(path)
             if entry is not None and reads:
                 return self._static(environ, start_response, entry)
+            if reads and path in STATIC_FILES:
+                self.warn_missing_pages()
             if not reads:
                 if path in STATIC_FILES:
                     raise HttpError(405, "method not allowed")  # the body is never read
@@ -1144,7 +1162,8 @@ def main(argv=None):
     app = App(args.db, secure_cookies=not args.insecure_cookies, trust_proxy=args.trust_proxy)
     with dev_server(app, args.host, args.port) as server:
         print(f"LYD wallet on http://{args.host}:{args.port}/ (the workers' screens; "
-              f"API under /api/; database {args.db})")
+              f"API under /api/; database {args.db})", flush=True)
+        app.warn_missing_pages()
         server.serve_forever()
 
 

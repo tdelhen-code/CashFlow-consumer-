@@ -293,25 +293,43 @@ class PageTests(ScreensTestCase):
         (self.static / "style.css").mkdir()         # there, but not a file it can read
         with mock.patch("sys.stderr", io.StringIO()) as err:
             app = self.make_app()
+            # Nothing is said when the app is made: a server's own first line,
+            # or its error, comes first (app.serve's tests read it). Nor for the
+            # API, or for the pages that are there.
+            self.assertEqual(raw(app, "GET", "/api/ping")[0], 200)
+            self.assertEqual(raw(app, "GET", "/")[0], 200)
+            self.assertEqual(raw(app, "HEAD", "/static/icon.svg")[0], 200)
+            self.assertEqual(raw(app, "POST", "/static/app.js")[0], 405)
+            self.assertEqual(err.getvalue(), "")
+            # The first request for a missing one names every one, once.
             for _ in range(3):
-                self.assert_not_found(raw(app, "GET", "/static/app.js"), "app.js")
                 self.assert_not_found(raw(app, "GET", "/static/style.css"), "style.css")
-        lines = err.getvalue().splitlines()         # said once each, at the start
+                self.assert_not_found(raw(app, "GET", "/static/app.js"), "app.js")
+                self.assertEqual(raw(app, "HEAD", "/static/app.js")[0], 404)
+        lines = err.getvalue().splitlines()
         self.assertEqual(len(lines), 2, lines)
         self.assertEqual(lines[0], f"warning: {self.static / 'app.js'} is missing: "
                                    "the screens won't load")
         self.assertRegex(lines[1], "^warning: " + re.escape(str(self.static / "style.css")) +
                          r" can't be read \(.+\): the screens won't load$")
-        self.assertEqual(raw(app, "GET", "/")[0], 200)              # the others still are
-        self.assertEqual(raw(app, "POST", "/static/app.js")[0], 405)
         # No folder at all: every page is a 404, and the API works as ever.
         with mock.patch("sys.stderr", io.StringIO()) as err:
             app = self.make_app(static_dir=self.dir / "not-there")
+            self.assertEqual(raw(app, "GET", "/api/ping")[0], 200)
+            for path in web.STATIC_FILES:
+                self.assert_not_found(raw(app, "GET", path), path)
         self.assertEqual(err.getvalue().count("is missing: the screens won't load"),
                          len(web.STATIC_FILES))
-        for path in web.STATIC_FILES:
-            self.assert_not_found(raw(app, "GET", path), path)
-        self.assertEqual(raw(app, "GET", "/api/ping")[0], 200)
+        self.assertEqual(len(err.getvalue().splitlines()), len(web.STATIC_FILES))
+        # With every file there, nothing is ever said.
+        (self.static / "style.css").rmdir()
+        for name in ("app.js", "style.css"):
+            (self.static / name).write_bytes(FILES[name])
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            complete = self.make_app()
+            complete.warn_missing_pages()
+            self.assertEqual(raw(complete, "GET", "/nothing")[0], 404)
+        self.assertEqual(err.getvalue(), "")
 
     def test_page_files_are_read_at_start(self):
         _, before, page = raw(self.app, "GET", "/")
@@ -320,12 +338,13 @@ class PageTests(ScreensTestCase):
         status, after, again = raw(self.app, "GET", "/")
         self.assertEqual((status, again, after["ETag"]), (200, page, before["ETag"]))
         self.assertEqual(raw(self.app, "GET", "/static/app.js")[2], FILES["app.js"])
-        with mock.patch("sys.stderr", io.StringIO()):
-            restarted = self.make_app()             # a restart reads them again
+        restarted = self.make_app()             # a restart reads them again
         status, headers, body = raw(restarted, "GET", "/")
         self.assertEqual(body, b"<!doctype html>\n<title>Changed</title>\n")
         self.assertNotEqual(headers["ETag"], before["ETag"])
-        self.assertEqual(raw(restarted, "GET", "/static/app.js")[0], 404)
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            self.assertEqual(raw(restarted, "GET", "/static/app.js")[0], 404)
+        self.assertIn("app.js is missing", err.getvalue())
 
     def test_pages_need_no_database(self):
         def no_database(*args):
@@ -463,16 +482,29 @@ class RealServerTests(ScreensTestCase):
 
             def serve_forever(self):
                 pass
+        real_read = web._read_static
+
+        def read_static(folder):        # app/static itself, played by the test's folder
+            self.assertEqual(folder, web.STATIC_DIR)
+            return real_read(self.static)
+        (self.static / "app.js").unlink()
         db = str(self.dir / "dev.db")
-        out = io.StringIO()
-        with mock.patch.object(web, "dev_server", Server), contextlib.redirect_stdout(out), \
-                mock.patch("sys.stderr", io.StringIO()):
+        log = io.StringIO()             # stdout and stderr in the order they were written
+        with mock.patch.object(web, "dev_server", Server), \
+                mock.patch.object(web, "_read_static", read_static), \
+                contextlib.redirect_stdout(log), mock.patch("sys.stderr", log):
             web.main(["--db", db, "--port", "8123", "--insecure-cookies"])
-        self.assertEqual(out.getvalue(), "LYD wallet on http://127.0.0.1:8123/ (the workers' "
-                                         f"screens; API under /api/; database {db})\n")
+        # Where the screens are, then (on stderr) the page file missing at start.
+        self.assertEqual(log.getvalue().splitlines(), [
+            f"LYD wallet on http://127.0.0.1:8123/ (the workers' screens; API under /api/; "
+            f"database {db})",
+            f"warning: {self.static / 'app.js'} is missing: the screens won't load"])
         [(app, host, port)] = started
         self.assertEqual((host, port, app.secure_cookies, app.origin_schemes),
                          ("127.0.0.1", 8123, False, ("https", "http")))
+        with mock.patch("sys.stderr", io.StringIO()) as err:      # not said a second time
+            self.assertEqual(raw(app, "GET", "/static/app.js")[0], 404)
+        self.assertEqual(err.getvalue(), "")
         app.close_connection()
 
 

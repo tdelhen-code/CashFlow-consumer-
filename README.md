@@ -235,9 +235,10 @@ French, copy the `en` block as `ar` or `fr`, translate its texts (keeping the
 keys and the `{name}`-style placeholders) and set its `meta.dir` (`rtl` for
 Arabic). Each worker then sees the language of their account (`language`),
 and English for a text that is missing. The five files are read once when the
-server starts, so a changed file needs a restart; one missing then is named in
-the log (`warning: ... is missing: the screens won't load`) and its path
-answers 404. They are served with a strict `Content-Security-Policy` (only
+server starts, so a changed file needs a restart. One missing then answers 404
+and is named in the log (`warning: ... is missing: the screens won't load`):
+by `app.web` right after its first line, by `app.serve` when the file is
+first asked for. They are served with a strict `Content-Security-Policy` (only
 the page's own files and API, no inline script or style, no native form
 submit, never inside another site's frame), `X-Frame-Options: DENY`,
 `nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-cache` with

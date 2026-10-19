@@ -457,8 +457,9 @@ upgrade, restore the backup taken just before it.
 - Free disk space, with `df -h` on Linux.
 - After an update, open the wallet's address: it should show the workers'
   login screen. If it shows `{"error": "not found", "type": "http"}`
-  instead, the screens' files are missing; the start of the app's log
-  (`docker compose logs app`) names each one with `the screens won't load`.
+  instead, the screens' files are missing: the app's log
+  (`docker compose logs app`) then names each one with
+  `the screens won't load`.
 
 ## Without Docker
 
