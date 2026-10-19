@@ -5,6 +5,7 @@ stand-in files from a temporary folder, never app/static itself."""
 import contextlib
 import hashlib
 import http.client
+import inspect
 import io
 import json
 import re
@@ -191,6 +192,8 @@ class PageTests(ScreensTestCase):
             "/": "index.html", "/static/app.js": "app.js", "/static/strings.js": "strings.js",
             "/static/style.css": "style.css", "/static/icon.svg": "icon.svg"})
         self.assertEqual(web.STATIC_DIR, ROOT / "app" / "static")
+        self.assertEqual(inspect.signature(web.App).parameters["static_dir"].default,
+                         web.STATIC_DIR)
         self.assertEqual(web.PAGE_CSP, (
             "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
             "connect-src 'self'; form-action 'none'; base-uri 'none'; "
@@ -765,7 +768,8 @@ class LanguageTests(ScreensTestCase):
             "name": "Otto", "phone": "0912222222", "language": "de"})
         self.assertEqual((status, answer), (400, {"error": "language must be one of ar, en, fr",
                                                   "type": "LedgerError"}))
-        self.assertNotIn("Otto", {u["name"] for u in self.admin.get("/api/admin/users")[1]["users"]})
+        users = self.admin.get("/api/admin/users")[1]["users"]
+        self.assertNotIn("Otto", {u["name"] for u in users})
 
     def test_the_code_defaults_are_english(self):
         conn = A.connect(self.db_path)

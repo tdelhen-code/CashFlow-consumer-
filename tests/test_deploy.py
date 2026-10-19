@@ -16,6 +16,7 @@ from unittest import mock
 
 from app import manage as M
 from app import serve as S
+from app import web as W
 
 ROOT = Path(__file__).resolve().parent.parent
 SH = shutil.which("sh")
@@ -328,7 +329,7 @@ class ImageTests(unittest.TestCase):
         for pattern in patterns[patterns.index("!app/") + 1:]:     # later lines win
             if pattern.startswith("!"):
                 continue
-            for path in ("app/static", "app/static/index.html", "app/static/app.js"):
+            for path in ("app/static", *(f"app/static/{n}" for n in W.STATIC_FILES.values())):
                 self.assertFalse(fnmatch.fnmatchcase(path,
                                                      pattern.rstrip("/").replace("**", "*")),
                                  (pattern, path))
