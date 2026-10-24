@@ -940,6 +940,44 @@ class BrowserTests(unittest.TestCase):
         self.assert_text(page, "#send-balance", text("send.balance", amount=lyd("5.000")))
         self.assertEqual(self.transactions("transfer", sam.id), 0)
 
+    def test_a_late_home_load_never_hides_a_send(self):
+        ali, sam = self.worker("Ali", lyd=100), self.worker("Sam")
+        page = self.page
+        self.open(page)
+        self.log_in(page, ali.phone)
+        # A Refresh whose statement answers only after a send: it read the
+        # balance and the list from before it.
+        held = []
+
+        def hold_the_first(route):
+            if held:
+                route.continue_()
+            else:
+                held.append((route, route.fetch()))
+        stop = self.intercept(page, "/api/statement", hold_the_first)
+        page.tap("#home-refresh")
+        expect(page.locator("#home-refresh")).to_be_disabled()
+        # Waiting on each step, not on the page's being idle: it isn't.
+        page.tap('#nav a[data-nav="send"]')
+        page.locator('body[data-screen="send"]').wait_for(state="attached")
+        page.fill("#send-phone", sam.phone)
+        page.fill("#send-amount", "10")
+        page.tap("#send-next")
+        self.assert_step(page, "send", "confirm")
+        page.tap("#send-confirm")
+        self.assert_step(page, "send", "done")
+        page.tap("#send-done-ok")
+        self.assert_text(page, "#home-balance", lyd("90.000"))
+        expect(page.locator('#statement-list > li.entry[data-dir="out"]')).to_have_count(1)
+        self.assertEqual(len(held), 1)
+        route, answer = held[0]
+        route.fulfill(response=answer)
+        stop()
+        self.wait_idle(page)
+        self.assert_text(page, "#home-balance", lyd("90.000"))
+        expect(page.locator('#statement-list > li.entry[data-dir="out"]')).to_have_count(1)
+        expect(page.locator("#home-refresh")).to_be_enabled()
+
     # ---------- prices, quote and order ----------
 
     def test_prices_make_no_quotes(self):

@@ -969,7 +969,7 @@
 
   // ---------- balance and statement ----------
 
-  var home = {busy: false};
+  var home = {seq: 0};      // the latest load's number: only its answer is shown
 
   var ENTRY_LABELS = {
     deposit: k("entry.deposit"),
@@ -983,7 +983,6 @@
   };
 
   function resetHome() {
-    home.busy = false;
     byId("home-name").textContent = "";
     byId("home-balance").textContent = "";
     byId("home-updated").textContent = "";
@@ -1038,14 +1037,16 @@
   }
 
   // Loads the balance and the newest entries (limit PAGE), or only the
-  // entries (PAGE_MORE, "Show more").
+  // entries (PAGE_MORE, "Show more"). A load started while an earlier one
+  // is under way replaces it (the earlier one may have read the balance
+  // before a send or an order): only the latest load's answer is shown.
   function loadHome(limit) {
-    if (home.busy) {
-      return Promise.resolve();
-    }
     var list = byId("statement-list"), error = byId("home-error"), epoch = state.epoch;
     var buttons = [byId("home-refresh"), byId("statement-more")];
-    home.busy = true;
+    var seq = home.seq += 1;
+    function latest() {
+      return epoch === state.epoch && seq === home.seq;
+    }
     setBusy(null, buttons, true);
     list.setAttribute("aria-busy", "true");
     silence(error);
@@ -1054,7 +1055,7 @@
       calls.push(api("GET", "/api/me", null, isMe));
     }
     return Promise.all(calls).then(function (answers) {
-      if (epoch !== state.epoch) {
+      if (!latest()) {
         return;
       }
       if (answers.length > 1) {
@@ -1073,14 +1074,13 @@
       byId("statement-more").hidden = !(limit === PAGE && entries.length >= PAGE);
       fill(byId("home-updated"), k("home.updated"), {time: clockText(Date.now())});
     }, function (problem) {
-      if (epoch !== state.epoch) {
+      if (!latest()) {
         return;
       }
       var rule = explain(problem);
       return common(rule) || showError(error, rule.key);
     }).then(function () {
-      if (epoch === state.epoch) {
-        home.busy = false;
+      if (latest()) {
         setBusy(null, buttons, false);
         list.setAttribute("aria-busy", "false");
       }
@@ -1406,7 +1406,7 @@
   // learns why, also when the refusal came after the price's time.
 
   var cur = {
-    step: "ask", pricesBusy: false, quoteBusy: false, orderBusy: false, unsure: false,
+    step: "ask", pricesSeq: 0, quoteBusy: false, orderBusy: false, unsure: false,
     quote: null, date: null, arrived: 0, timer: null, seen: true, refusal: null
   };
 
@@ -1424,7 +1424,7 @@
   function resetCurrency() {
     stopCountdown();
     cur = {
-      step: "ask", pricesBusy: false, quoteBusy: false, orderBusy: false, unsure: false,
+      step: "ask", pricesSeq: 0, quoteBusy: false, orderBusy: false, unsure: false,
       quote: null, date: null, arrived: 0, timer: null, seen: true, refusal: null
     };
     byId("prices-list").textContent = "";
@@ -1492,29 +1492,29 @@
     byId("quote-form").hidden = prices.length === 0;
   }
 
-  // GET /api/prices: it reads only; no quote is made.
+  // GET /api/prices: it reads only; no quote is made. As in loadHome, a new
+  // load replaces one under way.
   function loadPrices() {
-    if (cur.pricesBusy) {
-      return Promise.resolve();
-    }
     var list = byId("prices-list"), error = byId("prices-error"), epoch = state.epoch;
-    cur.pricesBusy = true;
+    var seq = cur.pricesSeq += 1;
+    function latest() {
+      return epoch === state.epoch && seq === cur.pricesSeq;
+    }
     setBusy(null, [byId("prices-refresh")], true);
     list.setAttribute("aria-busy", "true");
     silence(error);
     return api("GET", "/api/prices", null, isPrices).then(function (answer) {
-      if (epoch === state.epoch) {
+      if (latest()) {
         showPrices(answer.data.prices);
       }
     }, function (problem) {
-      if (epoch !== state.epoch) {
+      if (!latest()) {
         return;
       }
       var rule = explain(problem);
       return common(rule) || showError(error, rule.key);
     }).then(function () {
-      if (epoch === state.epoch) {
-        cur.pricesBusy = false;
+      if (latest()) {
         setBusy(null, [byId("prices-refresh")], false);
         list.setAttribute("aria-busy", "false");
       }
@@ -1856,10 +1856,9 @@
 
   // ---------- my orders ----------
 
-  var orders = {busy: false};
+  var orders = {seq: 0};    // as home.seq
 
   function resetOrders() {
-    orders.busy = false;
     byId("orders-list").textContent = "";
     byId("orders-empty").hidden = true;
     byId("orders-more").hidden = true;
@@ -1895,18 +1894,20 @@
     return item;
   }
 
+  // As in loadHome, a new load replaces one under way, so the list shown
+  // after an order has it.
   function loadOrders(limit) {
-    if (orders.busy) {
-      return Promise.resolve();
-    }
     var list = byId("orders-list"), error = byId("orders-error"), epoch = state.epoch;
     var buttons = [byId("orders-refresh"), byId("orders-more")];
-    orders.busy = true;
+    var seq = orders.seq += 1;
+    function latest() {
+      return epoch === state.epoch && seq === orders.seq;
+    }
     setBusy(null, buttons, true);
     list.setAttribute("aria-busy", "true");
     silence(error);
     return api("GET", "/api/orders?limit=" + limit, null, isOrders).then(function (answer) {
-      if (epoch !== state.epoch) {
+      if (!latest()) {
         return;
       }
       var items = answer.data.orders;
@@ -1917,14 +1918,13 @@
       byId("orders-empty").hidden = items.length > 0;
       byId("orders-more").hidden = !(limit === PAGE && items.length >= PAGE);
     }, function (problem) {
-      if (epoch !== state.epoch) {
+      if (!latest()) {
         return;
       }
       var rule = explain(problem);
       return common(rule) || showError(error, rule.key);
     }).then(function () {
-      if (epoch === state.epoch) {
-        orders.busy = false;
+      if (latest()) {
         setBusy(null, buttons, false);
         list.setAttribute("aria-busy", "false");
       }
