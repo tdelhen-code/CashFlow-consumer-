@@ -380,6 +380,18 @@ input[readonly] {
   white-space: nowrap;
 }
 
+/* A worker's own text (a name, a note) takes the direction of its first
+   letter, so the "!" after an Arabic word is drawn at its end, on the
+   left; it still lines up with the page (text-align: match-parent would
+   say this, but Chromium keeps it as start). */
+[dir="auto"] {
+  text-align: left;
+}
+
+[dir="rtl"] [dir="auto"] {
+  text-align: right;
+}
+
 .in {
   color: var(--in);
 }

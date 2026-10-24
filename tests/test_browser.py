@@ -610,6 +610,38 @@ class BrowserTests(unittest.TestCase):
         expect(page.locator("#statement-empty")).to_be_hidden()
         expect(page.locator("#statement-more")).to_be_hidden()
 
+    def test_workers_texts_keep_their_own_direction(self):
+        # A name or note in Arabic reads right to left in the English page:
+        # its "!" or "." ends it on the left, not on the right where the
+        # Arabic starts. A Latin one stays left to right.
+        ali, sami = self.worker("علي", lyd=100), self.worker("سامي")
+        page = self.page
+        self.open(page)
+        self.log_in(page, ali.phone)
+        self.go(page, "send")
+        self.to_confirm(page, sami.phone, "10", "شكرا!")
+
+        def direction(selector):
+            return page.evaluate("s => getComputedStyle(document.querySelector(s)).direction",
+                                 selector)
+        self.assertEqual(direction("#send-confirm-name"), "rtl")
+        self.assertEqual(direction("#send-confirm-note"), "rtl")
+        # It still lines up with the rest of the page, on the left.
+        text_left, box_left = page.evaluate(
+            "() => { const el = document.querySelector('#send-confirm-note'),"
+            " range = document.createRange(); range.selectNodeContents(el);"
+            " return [range.getBoundingClientRect().left, el.getBoundingClientRect().left]; }")
+        self.assertAlmostEqual(text_left, box_left, delta=1)
+        self.tap(page, "#send-confirm")
+        self.tap(page, "#send-done-ok")
+        self.on_screen(page, "home")
+        self.assertEqual(direction("#statement-list .entry-note"), "rtl")
+        self.go(page, "account")
+        self.assertEqual(direction("#account-name"), "rtl")
+        self.go(page, "send")
+        self.to_confirm(page, sami.phone, "1", "rent (half).")
+        self.assertEqual(direction("#send-confirm-note"), "ltr")
+
     def test_statement_shows_50_then_more(self):
         omar = self.worker("Omar")
         for n in range(55):

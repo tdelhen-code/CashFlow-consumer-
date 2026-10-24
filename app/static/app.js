@@ -1030,8 +1030,11 @@
     item.appendChild(top);
     item.appendChild(below);
     // A reversal's note is the wallet's own wording, already in the label.
+    // Others are the worker's, in their own direction (dir="auto").
     if (entry.kind !== "reversal" && filled(entry.note)) {
-      item.appendChild(make("p", "entry-note", entry.note));
+      var note = make("p", "entry-note", entry.note);
+      note.dir = "auto";
+      item.appendChild(note);
     }
     return item;
   }
