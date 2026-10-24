@@ -125,8 +125,9 @@ Login (`app/auth.py`) and what the web app calls (`app/api.py`):
   id>`), and a code for an admin's account needs a reason. A worker whose code was already
   used, or who is logged out unexpectedly, must report it. Blocking or
   deactivating an admin stops every code they issued that nobody has used yet,
-  so a suspected or departed admin can't use one. Later: a second admin
-  approves resetting an admin's account;
+  so a suspected or departed admin can't use one. A code for an admin's
+  account needs a second admin's approval (see "Approvals" below), and the code goes
+  to the approver, not the admin who asked;
 - 5 wrong tries in a row (password, setup code, or the current password when
   changing it) from one address (IPv6: one /64) lock that phone number for 15
   minutes from that address, registered or not; the owner can still log in
