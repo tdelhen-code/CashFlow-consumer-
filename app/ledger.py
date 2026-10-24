@@ -529,6 +529,19 @@ def set_whatsapp(conn, user_id, whatsapp, *, admin_id):
         _log(conn, admin_id, "set_whatsapp", user_id, whatsapp=number)
 
 
+def set_language(conn, user_id, language, *, admin_id):
+    """The language a user's screens are shown in: en, ar or fr."""
+    if language not in LANGUAGES:
+        raise LedgerError(f"language must be one of {', '.join(LANGUAGES)}")
+    with _write(conn):
+        _require_admin(conn, admin_id)
+        user = _user(conn, user_id)
+        if user["language"] == language:
+            return
+        conn.execute("UPDATE users SET language = ? WHERE id = ?", (language, user_id))
+        _log(conn, admin_id, "set_language", user_id, language=language)
+
+
 def _user(conn, user_id):
     row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     if not row:
@@ -903,7 +916,7 @@ def account_statement(conn, code, limit=50):
 # What each admin log action's target is: user 2, order 2 and supplier 2 are
 # all target '2', so admin_log(kind=) tells them apart.
 LOG_TARGET_KIND = {
-    **dict.fromkeys(("create_user", "set_whatsapp", "block_user", "unblock_user",
+    **dict.fromkeys(("create_user", "set_whatsapp", "set_language", "block_user", "unblock_user",
                      "deactivate_user", "reactivate_user", "unlock_login",
                      "issue_setup_code", "setup_code_used"), "user"),
     **dict.fromkeys(("assign_supplier", "unassign_supplier", "cancel_order",

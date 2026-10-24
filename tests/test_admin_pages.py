@@ -2,14 +2,103 @@
 admin.css), read as text without a browser: the rules the workers' page
 keeps (tests/test_pages.py) that the page's Content-Security-Policy and
 tests/test_admin_browser.py rely on."""
+import json
 import re
 import unittest
+from html.parser import HTMLParser
 
-from tests.test_pages import Page, balanced, function_body, js_calls, literal_arg, read
+from tests.test_pages import PLACEHOLDER, Page, balanced, function_body, js_calls, literal_arg, read
 
 SCREENS = ("loading", "offline", "login", "setup", "overview", "workers", "worker", "money",
            "orders", "prices", "suppliers", "supplier", "log", "account")
 NAV = ("overview", "workers", "money", "orders", "prices", "suppliers", "log", "account")
+
+
+LITERAL = r'"(?:[^"\\]|\\.)*"'
+
+
+class _Texts(HTMLParser):
+    """admin.html's texts: each element marked data-t (its text, spaces
+    squeezed) and data-t-label (its aria-label), and any text not marked."""
+
+    def __init__(self, text):
+        super().__init__(convert_charrefs=True)
+        self.marked, self.unmarked, self.stack = [], [], []
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if "data-t-label" in attrs:
+            self.marked.append(attrs["aria-label"])
+        if tag not in ("input", "meta", "link", "br", "img"):
+            self.stack.append([tag, attrs, ""])
+
+    def handle_endtag(self, tag):
+        name, attrs, text = self.stack.pop()
+        text = " ".join(text.split())
+        if "data-t" in attrs:
+            self.marked.append(text)
+        elif text and name != "option" or (name == "option" and "lang" not in attrs and text):
+            self.unmarked.append((name, text))
+
+    def handle_data(self, data):
+        if self.stack:
+            self.stack[-1][2] += data
+
+
+def english_texts():
+    """Every English text the office's screens show: admin.html's marked
+    ones, then each written-out argument of t and k in admin.js (adjacent
+    literals joined with + count as one)."""
+    texts = _Texts(read("admin.html")).marked
+    code = read("admin.js")
+    for match in re.finditer(r"(?<![\w$.])(?:t|k)\(\s*(" + LITERAL + r"(?:\s*\+\s*" + LITERAL +
+                             r")*)", code):
+        texts.append("".join(json.loads(x) for x in re.findall(LITERAL, match.group(1))))
+    return list(dict.fromkeys(texts))
+
+
+def admin_strings():
+    text = read("admin-strings.js")
+    start = text.index("{", text.index("window.ADMIN_STRINGS ="))
+    return json.loads(text[start:text.rindex("}") + 1])
+
+
+class AdminStringsTests(unittest.TestCase):
+    def test_every_text_is_in_arabic_and_french_with_its_placeholders(self):
+        english, strings = english_texts(), admin_strings()
+        self.assertGreater(len(english), 400)
+        self.assertEqual(sorted(strings), ["ar", "fr"])
+        for code, table in strings.items():
+            with self.subTest(code):
+                self.assertEqual([e for e in english if e not in table], [], "missing")
+                self.assertEqual([k for k in table if k not in english], [], "not used")
+                for key, value in table.items():
+                    self.assertEqual(set(PLACEHOLDER.findall(value)),
+                                     set(PLACEHOLDER.findall(key)), (code, key))
+                    self.assertEqual(value, value.strip(), (code, key))
+                    self.assertNotEqual(value, "", (code, key))
+
+    def test_every_text_on_the_page_is_marked(self):
+        # Language names stay in their own language (lang="..."), and so do
+        # the language switch's buttons, filled by admin.js.
+        self.assertEqual(_Texts(read("admin.html")).unmarked, [])
+
+    def test_every_text_admin_js_shows_goes_through_t(self):
+        code = read("admin.js")
+        # A text put on the page: make's third argument, textContent, notify,
+        # showError, done, button and the ask box's texts are t(...) or data.
+        for pattern in (r'textContent = "[A-Za-z]', r'(notify|showError|done)\([^)]*?, "[A-Z]',
+                        r'notify\("[A-Z]', r'button\("[A-Z]',
+                        r'(title|text|yes): "[A-Z]', r'\[\["[A-Z]'):
+            with self.subTest(pattern):
+                self.assertNotRegex(code, pattern)
+
+    def test_the_languages(self):
+        code = read("admin.js")
+        self.assertIn('var LANGUAGES = {en: "English", ar: "العربية", fr: "Français"};', code)
+        self.assertIn('var DIRECTION = {ar: "rtl"};', code)
+        self.assertIn('var LOCALE = {en: "en-GB", ar: "ar-LY", fr: "fr-FR"};', code)
 
 
 class AdminPageTests(unittest.TestCase):
@@ -24,7 +113,9 @@ class AdminPageTests(unittest.TestCase):
         self.assertEqual(self.page.all("html"), [{"lang": "en", "dir": "ltr"}])
         self.assertEqual([a["href"] for a in self.page.all("link", rel="stylesheet")],
                          ["/static/style.css", "/static/admin.css"])
-        self.assertEqual(self.page.all("script"), [{"src": "/static/admin.js", "defer": None}])
+        self.assertEqual(self.page.all("script"), [
+            {"src": "/static/admin-strings.js", "defer": None},
+            {"src": "/static/admin.js", "defer": None}])
 
     def test_nothing_inline_and_nothing_from_elsewhere(self):
         self.assertNotIn("<style", self.text)

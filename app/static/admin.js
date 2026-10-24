@@ -4,7 +4,13 @@
 // the API is only called because someone did something (opened a screen,
 // pressed a button), never on a timer.
 //
-// The office reads the wallet's own error text (English): it says exactly
+// Texts: every text is written here (or in admin.html) in English, as the
+// argument of t ("Block {name}?", with {placeholders}) or, in a table, of k.
+// admin-strings.js gives each English text in Arabic and French; the admin
+// sees their account's language, and English for a text it lacks
+// (tests/test_admin_pages.py checks every text has both).
+//
+// The office reads the wallet's own error text (in English): it says exactly
 // what was refused ("order 4 is not placed"), which is what staff need.
 // Only a lost connection, a timeout and a logged-out session get texts of
 // their own.
@@ -14,6 +20,101 @@
   var TIMEOUT_MS = 20000;
   var PAGE = 50;            // rows loaded at first
   var PAGE_MORE = 200;      // "Show more": the most the API gives
+
+  // ---------- strings ----------
+
+  var STRINGS = window.ADMIN_STRINGS || {};
+  var LANGUAGES = {en: "English", ar: "العربية", fr: "Français"};
+  var DIRECTION = {ar: "rtl"};
+  var LOCALE = {en: "en-GB", ar: "ar-LY", fr: "fr-FR"};    // dates with the digits 0-9
+  var PLACEHOLDER = /\{([a-z_]+)\}/g;
+  var lang = "en";
+
+  function has(object, key) {
+    return object !== null && object !== undefined &&
+      Object.prototype.hasOwnProperty.call(object, key);
+  }
+
+  // An English text kept in a table, translated where it is shown (t).
+  function k(english) {
+    return english;
+  }
+
+  // The English text in the admin's language, with its {placeholders}
+  // filled in. Right to left, each value is isolated (U+2068 to U+2069), so
+  // a phone number or an amount keeps its own order inside Arabic text.
+  function t(english, params) {
+    var table = has(STRINGS, lang) ? STRINGS[lang] : null;
+    var text = table && has(table, english) ? table[english] : english;
+    var isolate = DIRECTION[lang] === "rtl";
+    return text.replace(PLACEHOLDER, function (whole, name) {
+      if (!has(params, name)) {
+        return whole;
+      }
+      return isolate ? "\u2068" + String(params[name]) + "\u2069" : String(params[name]);
+    });
+  }
+
+  // admin.html's texts: each element marked data-t keeps its English text
+  // (data-en, noted the first time), and data-t-label its aria-label.
+  function applyStrings() {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-t]"), function (el) {
+      if (!el.hasAttribute("data-en")) {
+        el.setAttribute("data-en", el.textContent.replace(/\s+/g, " ").trim());
+      }
+      el.textContent = t(el.getAttribute("data-en"));
+    });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-t-label]"), function (el) {
+      if (!el.hasAttribute("data-en-label")) {
+        el.setAttribute("data-en-label", el.getAttribute("aria-label"));
+      }
+      el.setAttribute("aria-label", t(el.getAttribute("data-en-label")));
+    });
+  }
+
+  function chooseLanguage(code) {
+    lang = has(LANGUAGES, code) && (code === "en" || has(STRINGS, code)) ? code : "en";
+    document.documentElement.setAttribute("lang", lang);
+    document.documentElement.setAttribute("dir", DIRECTION[lang] || "ltr");
+    timeFormat = null;
+    applyStrings();
+    Array.prototype.forEach.call(byId("lang-switch").querySelectorAll("button"),
+                                 function (button) {
+      button.setAttribute("aria-pressed",
+                          button.getAttribute("data-lang") === lang ? "true" : "false");
+    });
+  }
+
+  // Before a login: the language picked on the switch, else the first of the
+  // browser's languages there is, else English. Logged in: the admin's own.
+  var picked = null;
+
+  function preferredLanguage() {
+    if (picked) {
+      return picked;
+    }
+    var wanted = navigator.languages || [navigator.language || ""];
+    for (var i = 0; i < wanted.length; i += 1) {
+      var code = String(wanted[i]).slice(0, 2).toLowerCase();
+      if (has(LANGUAGES, code) && (code === "en" || has(STRINGS, code))) {
+        return code;
+      }
+    }
+    return "en";
+  }
+
+  function wireLanguageSwitch() {
+    Array.prototype.forEach.call(byId("lang-switch").querySelectorAll("button"),
+                                 function (button) {
+      var code = button.getAttribute("data-lang");
+      button.textContent = LANGUAGES[code];
+      button.hidden = code !== "en" && !has(STRINGS, code);
+      button.addEventListener("click", function () {
+        picked = code;
+        chooseLanguage(code);
+      });
+    });
+  }
 
   // ---------- page helpers ----------
 
@@ -103,7 +204,7 @@
     while (fraction.length < 3) {
       fraction = "0" + fraction;
     }
-    return (negative ? "−" : "") + whole + "." + fraction + " LYD";
+    return t("{amount} LYD", {amount: (negative ? "−" : "") + whole + "." + fraction});
   }
 
   function signed(dirhams) {
@@ -140,16 +241,22 @@
     return typeof text === "string" ? Date.parse(text.replace(/(\.\d{3})\d+/, "$1")) : NaN;
   }
 
-  var timeFormat;
-  try {
-    timeFormat = new Intl.DateTimeFormat("en-GB", {dateStyle: "medium", timeStyle: "short"});
-  } catch (e) {
-    timeFormat = new Intl.DateTimeFormat("en-GB");
-  }
+  var timeFormat = null;     // for the language shown (chooseLanguage clears it)
 
   function when(text) {
     var ms = parseTime(text);
-    return isNaN(ms) ? String(text || "") : timeFormat.format(new Date(ms));
+    if (isNaN(ms)) {
+      return String(text || "");
+    }
+    if (!timeFormat) {
+      try {
+        timeFormat = new Intl.DateTimeFormat(LOCALE[lang], {dateStyle: "medium",
+                                                            timeStyle: "short"});
+      } catch (e) {
+        timeFormat = new Intl.DateTimeFormat(LOCALE[lang]);
+      }
+    }
+    return timeFormat.format(new Date(ms));
   }
 
   function phoneText(phone) {
@@ -169,14 +276,14 @@
   }
 
   var KIND = {
-    deposit: "Deposit", payroll: "Salary", transfer: "Transfer between workers",
-    order: "Currency order", withdrawal: "Cash withdrawal", reversal: "Reversal",
-    settlement: "Paid to supplier", payout: "Order paid out", capital: "Capital",
-    move: "Moved between bank and tills"
+    deposit: k("Deposit"), payroll: k("Salary"), transfer: k("Transfer between workers"),
+    order: k("Currency order"), withdrawal: k("Cash withdrawal"), reversal: k("Reversal"),
+    settlement: k("Paid to supplier"), payout: k("Order paid out"),
+    capital: k("Owner's money"), move: k("Moved between bank and tills")
   };
 
   function kindText(kind) {
-    return KIND[kind] || kind;
+    return has(KIND, kind) ? t(KIND[kind]) : kind;
   }
 
   // ---------- calls ----------
@@ -248,16 +355,18 @@
 
   function errorText(problem) {
     if (problem.kind === "network") {
-      return "No connection to the wallet. Check the internet and try again.";
+      return t("No connection to the wallet. Check the internet and try again.");
     }
     if (problem.kind === "timeout") {
-      return "The wallet didn't answer in time. Try again.";
+      return t("The wallet didn't answer in time. Try again.");
     }
     if (problem.status >= 500 || !problem.message) {
-      return "Something went wrong on the wallet's side (" + problem.status + "). Try again.";
+      return t("Something went wrong on the wallet's side ({status}). Try again.",
+               {status: problem.status});
     }
     var text = problem.message;
-    return text.charAt(0).toUpperCase() + text.slice(1) + (/[.!?]$/.test(text) ? "" : ".");
+    text = text.charAt(0).toUpperCase() + text.slice(1) + (/[.!?]$/.test(text) ? "" : ".");
+    return lang === "en" ? text : t("The wallet says: {reason}", {reason: text});
   }
 
   // A failed call: a session that ended goes to the login screen (true);
@@ -265,12 +374,12 @@
   function handle(problem, line) {
     if (problem.kind === "http" && problem.status === 401 && problem.type === "NotLoggedIn" &&
         state.me) {
-      loggedOut("Your session ended. Please log in again.");
+      loggedOut(t("Your session ended. Please log in again."));
       return true;
     }
     if (problem.kind === "http" && problem.status === 403 &&
         problem.type === "PermissionDenied" && state.me) {
-      loggedOut("That account isn't an office account any more.");
+      loggedOut(t("That account isn't an office account any more."));
       return true;
     }
     showError(line, errorText(problem));
@@ -301,6 +410,7 @@
     state.screen = name;
     var loggedIn = state.me !== null && name !== "login" && name !== "setup";
     byId("nav").hidden = !loggedIn;
+    byId("lang-switch").hidden = name !== "login" && name !== "setup";
     Array.prototype.forEach.call(document.querySelectorAll("#nav a"), function (a) {
       if (a.getAttribute("data-nav") === (NAV_OF[name] || name)) {
         a.setAttribute("aria-current", "page");
@@ -345,6 +455,7 @@
 
   function loggedIn(me) {
     state.me = me;
+    chooseLanguage(me.language);
     var who = byId("bar-who");
     who.textContent = me.name;
     who.hidden = false;
@@ -352,6 +463,7 @@
     byId("account-phone").textContent = phoneText(me.phone);
   }
 
+  // Logged out, the screens stay in the language they were in.
   function loggedOut(message) {
     state.me = null;
     byId("bar-who").hidden = true;
@@ -366,6 +478,7 @@
   }
 
   function start() {
+    chooseLanguage(state.me ? state.me.language : preferredLanguage());
     show("loading");
     get("/api/admin/me").then(function (me) {
       loggedIn(me);
@@ -448,7 +561,7 @@
     };
     if ((question.reason && !values.reason) || (question.ref && !values.payout_ref) ||
         (question.supplier && !(values.supplier_id > 0))) {
-      showError(error, "Fill in every field first.");
+      showError(error, t("Fill in every field first."));
       return;
     }
     silence(error);
@@ -463,8 +576,9 @@
         return;
       }
       if (question.key && lost(problem)) {
-        showError(error, errorText(problem) + " It may have gone through: press " +
-                  question.yes + " again to make sure. It won't be done twice.");
+        showError(error, errorText(problem) + " " + t("It may have gone through: press " +
+                  "\"{button}\" again to make sure. It won't be done twice.",
+                                                      {button: question.yes}));
       }
     });
   });
@@ -535,7 +649,7 @@
   onSubmit("login-form", "login-error", function () {
     var phone = byId("login-phone").value, password = byId("login-password").value;
     if (!filled(phone) || !password) {
-      showError(byId("login-error"), "Fill in your phone number and password.");
+      showError(byId("login-error"), t("Fill in your phone number and password."));
       return null;
     }
     return post("/api/login", {phone: phone, password: password}).then(afterLogin);
@@ -551,8 +665,8 @@
       if (problem.kind === "http" && problem.status === 403) {
         return post("/api/logout").catch(function () {}).then(function () {
           show("login");
-          showError(byId("login-error"), "This is a worker's account. Workers use the " +
-                    "wallet at the main address, not the office screens.");
+          showError(byId("login-error"), t("This is a worker's account. Workers use the " +
+                    "wallet at the main address, not the office screens."));
         });
       }
       throw problem;
@@ -563,11 +677,11 @@
     var phone = byId("setup-phone").value, code = byId("setup-code").value;
     var password = byId("setup-password").value;
     if (!filled(phone) || !filled(code) || !password) {
-      showError(byId("setup-error"), "Fill in every field.");
+      showError(byId("setup-error"), t("Fill in every field."));
       return null;
     }
     if (password !== byId("setup-password2").value) {
-      showError(byId("setup-error"), "The two new passwords are different.");
+      showError(byId("setup-error"), t("The two new passwords are different."));
       return null;
     }
     return post("/api/setup-password", {phone: phone, code: code, password: password})
@@ -582,29 +696,41 @@
     var old = byId("password-old").value, fresh = byId("password-new").value;
     silence(byId("password-done"));
     if (!old || !fresh) {
-      showError(byId("password-error"), "Fill in every field.");
+      showError(byId("password-error"), t("Fill in every field."));
       return null;
     }
     if (fresh !== byId("password-new2").value) {
-      showError(byId("password-error"), "The two new passwords are different.");
+      showError(byId("password-error"), t("The two new passwords are different."));
       return null;
     }
     return post("/api/change-password", {old_password: old, new_password: fresh})
       .then(function () {
         byId("password-form").reset();
-        done("password-done", "Your password is changed. You're logged out everywhere else.");
+        done("password-done",
+             t("Your password is changed. You're logged out everywhere else."));
+      });
+  });
+
+  // The admin's own language: saved on their account, and shown at once.
+  onSubmit("my-language-form", "my-language-error", function () {
+    var code = byId("my-language").value;
+    return post("/api/admin/users/" + state.me.id + "/language", {language: code})
+      .then(function () {
+        state.me.language = code;
+        chooseLanguage(code);
+        notify(t("The office screens are now in {language}.", {language: LANGUAGES[code]}));
       });
   });
 
   onClick("logout", "account-error", function () {
     return post("/api/logout").then(function () {
-      loggedOut("You're logged out.");
+      loggedOut(t("You're logged out."));
     });
   });
 
   onClick("logout-all", "account-error", function () {
     return post("/api/logout-everywhere").then(function () {
-      loggedOut("You're logged out on every device.");
+      loggedOut(t("You're logged out on every device."));
     });
   });
 
@@ -619,14 +745,15 @@
       var checks = byId("overview-checks"), problems = byId("overview-problems");
       clear(problems);
       if (health.problems.length) {
-        checks.textContent = "The books' checks found " + health.problems.length +
-          " problem" + (health.problems.length === 1 ? "" : "s") + ":";
+        checks.textContent = health.problems.length === 1 ?
+          t("The books' checks found 1 problem:") :
+          t("The books' checks found {count} problems:", {count: health.problems.length});
         checks.className = "check-line bad";
         health.problems.forEach(function (problem) {
           problems.appendChild(make("li", null, problem));
         });
       } else {
-        checks.textContent = "The books' checks are all fine.";
+        checks.textContent = t("The books' checks are all fine.");
         checks.className = "check-line good";
       }
       problems.hidden = !health.problems.length;
@@ -647,19 +774,21 @@
 
   function maintenanceText(m) {
     if (!m) {
-      return "This server doesn't run the hourly checks or the backups (the test " +
-        "server). The production server (app.serve) does.";
+      return t("This server doesn't run the hourly checks or the backups (the test " +
+        "server). The production server (app.serve) does.");
     }
     var parts = [];
-    parts.push(m.last_check ? "Last hourly check " + when(m.last_check.at) + ": " +
-               (m.last_check.ok ? "fine." : "found problems.") : "No hourly check yet.");
+    parts.push(!m.last_check ? t("No hourly check yet.") : m.last_check.ok ?
+               t("Last hourly check {time}: fine.", {time: when(m.last_check.at)}) :
+               t("Last hourly check {time}: found problems.", {time: when(m.last_check.at)}));
     if (!m.backups_on) {
-      parts.push("Backups are off.");
+      parts.push(t("Backups are off."));
     } else {
-      parts.push(m.last_good_backup_at ? "Last good backup " + when(m.last_good_backup_at) +
-                 "." : "No good backup yet.");
+      parts.push(m.last_good_backup_at ?
+                 t("Last good backup {time}.", {time: when(m.last_good_backup_at)}) :
+                 t("No good backup yet."));
       if (m.backup_overdue) {
-        parts.push("A backup is overdue: check the server's log.");
+        parts.push(t("A backup is overdue: check the server's log."));
       }
     }
     return parts.join(" ");
@@ -671,12 +800,12 @@
     var name = byId("till-name").value;
     silence(byId("till-done"));
     if (!filled(name)) {
-      showError(byId("till-error"), "Type the till's name.");
+      showError(byId("till-error"), t("Type the till's name."));
       return null;
     }
     return post("/api/admin/tills", {name: name}).then(function (made) {
       byId("till-name").value = "";
-      done("till-done", made.code + " is added.");
+      done("till-done", t("{code} is added.", {code: made.code}));
       return loadHealth();
     });
   });
@@ -731,16 +860,16 @@
   function statusText(user) {
     var parts = [];
     if (user.role === "admin") {
-      parts.push("Office staff");
+      parts.push(t("Office staff"));
     }
     if (!user.active) {
-      parts.push("Closed");
+      parts.push(t("Closed"));
     } else if (user.blocked) {
-      parts.push("Blocked");
+      parts.push(t("Blocked"));
     } else if (!user.has_password) {
-      parts.push("Waiting for a password");
+      parts.push(t("Waiting for a password"));
     } else {
-      parts.push("Active");
+      parts.push(t("Active"));
     }
     return parts.join(" · ");
   }
@@ -769,7 +898,8 @@
       link.dir = "auto";
       name.appendChild(link);
       cell(row, phoneText(user.phone), "num");
-      cell(row, user.role === "admin" ? "" : user.balance_lyd + " LYD", "num end");
+      cell(row, user.role === "admin" ? "" : t("{amount} LYD", {amount: user.balance_lyd}),
+           "num end");
       cell(row, null).appendChild(make("span", statusClass(user), statusText(user)));
       rows.appendChild(row);
     });
@@ -791,9 +921,9 @@
 
   function showCode(box, title, value, text, user) {
     byId(box + "-value").textContent = value;
-    byId(box + "-text").textContent = "Give it to " + user + " in person or by WhatsApp. " +
+    byId(box + "-text").textContent = t("Give it to {name} in person or by WhatsApp. " +
       "They use it once, with their phone number, to choose their password, within 3 days. " +
-      "It isn't shown again; a new code replaces it.";
+      "It isn't shown again; a new code replaces it.", {name: user});
     if (title) {
       byId(box + "-title").textContent = title;
     }
@@ -804,7 +934,7 @@
   onSubmit("worker-add-form", "worker-add-error", function () {
     var name = byId("worker-add-name").value, phone = byId("worker-add-phone").value;
     if (!filled(name) || !filled(phone)) {
-      showError(byId("worker-add-error"), "Fill in the name and the phone number.");
+      showError(byId("worker-add-error"), t("Fill in the name and the phone number."));
       return null;
     }
     var body = {name: name.trim(), phone: phone, role: byId("worker-add-role").value,
@@ -815,7 +945,8 @@
     return post("/api/admin/users", body).then(function (made) {
       byId("worker-add-form").reset();
       byId("worker-add").hidden = true;
-      showCode("code", body.name + "'s account is ready", made.setup_code, "", body.name);
+      showCode("code", t("{name}'s account is ready", {name: body.name}), made.setup_code,
+               "", body.name);
       return loadUsers().then(drawUsers);
     });
   });
@@ -846,7 +977,7 @@
     return state.holdings.filter(function (code) {
       return !tillsOnly || code.indexOf("TILL_") === 0;
     }).map(function (code) {
-      return [code, code === "BANK" ? "Bank (BANK)" : code];
+      return [code, code === "BANK" ? t("Bank (BANK)") : code];
     });
   }
 
@@ -859,8 +990,8 @@
   function openWorker(id) {
     worker.id = id;
     worker.limit = PAGE;
-    ["worker-error", "deposit-error", "withdraw-error", "whatsapp-error", "whatsapp-done"]
-      .forEach(function (line) { silence(byId(line)); });
+    ["worker-error", "deposit-error", "withdraw-error", "whatsapp-error", "whatsapp-done",
+     "language-error", "language-done"].forEach(function (line) { silence(byId(line)); });
     byId("worker-code-box").hidden = true;
     byId("deposit-form").reset();
     byId("withdraw-form").reset();
@@ -877,7 +1008,7 @@
         }
         var user = userById(id);
         if (!user) {
-          byId("worker-name").textContent = "No such account";
+          byId("worker-name").textContent = t("No such account");
           return;
         }
         drawWorker(user, got[2]);
@@ -892,25 +1023,27 @@
     var isAdmin = user.role === "admin";
     byId("worker-name").textContent = user.name;
     byId("worker-phone").textContent = phoneText(user.phone);
-    byId("worker-whatsapp").textContent = user.whatsapp || "None";
+    byId("worker-whatsapp").textContent = user.whatsapp || t("None");
     var status = byId("worker-status");
     clear(status);
     status.appendChild(make("span", statusClass(user), statusText(user)));
     if (user.blocked && user.blocked_reason) {
       status.appendChild(make("span", "muted small block-reason",
-                              " Blocked " + when(user.blocked_at) + ": " +
-                              user.blocked_reason));
+                              t("Blocked {time}: {reason}", {time: when(user.blocked_at),
+                                                             reason: user.blocked_reason})));
     }
-    byId("worker-balance").textContent = isAdmin ? "Office accounts hold no money" :
+    byId("worker-balance").textContent = isAdmin ? t("Office accounts hold no money") :
       lyd(statement.balance.dirhams);
     byId("whatsapp-number").value = user.whatsapp || "";
+    byId("worker-language").textContent = LANGUAGES[user.language] || user.language;
+    byId("language-choice").value = user.language;
     byId("worker-money").hidden = isAdmin || !user.active;
     fillSelect(byId("deposit-into"), holdingChoices(false));
     var tills = holdingChoices(true);
     fillSelect(byId("withdraw-till"), tills);
     byId("withdraw-submit").disabled = !tills.length;
     if (!tills.length) {
-      byId("withdraw-till").title = "Add a till on the Overview first.";
+      byId("withdraw-till").title = t("Add a till on the Overview first.");
     }
     drawWorkerActions(user);
 
@@ -928,7 +1061,7 @@
       cell(row, lyd(entry.balance_after), "num end");
       var actions = cell(row, null, "end");
       if (entry.kind !== "reversal" && entry.kind !== "order" && entry.kind !== "payout") {
-        actions.appendChild(button("Reverse", "danger-outline", function () {
+        actions.appendChild(button(t("Reverse"), "danger-outline", function () {
           askReverse(entry, user);
         }));
       }
@@ -942,50 +1075,54 @@
   function drawWorkerActions(user) {
     var box = byId("worker-actions");
     clear(box);
-    function action(label, path, title, text, danger) {
+    var who = {name: user.name};
+    function action(label, path, title, text, doneText, danger) {
       box.appendChild(button(label, danger ? "danger-outline" : "secondary", function () {
         ask({title: title, text: text, reason: true, yes: label, danger: danger,
              act: function (values) {
                return post("/api/admin/users/" + user.id + "/" + path,
                            {reason: values.reason}).then(function () {
-                 notify(title.replace(/\?$/, "") + ": done.");
+                 notify(doneText);
                  return loadWorker();
                });
              }});
       }));
     }
     if (user.active) {
-      box.appendChild(button("New setup code", "secondary", function () {
+      box.appendChild(button(t("New setup code"), "secondary", function () {
         askSetupCode(user);
       }));
       if (user.blocked) {
-        action("Unblock", "unblock", "Unblock " + user.name + "?",
-               "They can log in and use their wallet again.");
+        action(t("Unblock"), "unblock", t("Unblock {name}?", who),
+               t("They can log in and use their wallet again."),
+               t("{name} is unblocked.", who));
       } else {
-        action("Block", "block", "Block " + user.name + "?",
-               "They're logged out at once and can't log in, send or order until " +
-               "unblocked. Their money stays.", true);
+        action(t("Block"), "block", t("Block {name}?", who),
+               t("They're logged out at once and can't log in, send or order until " +
+                 "unblocked. Their money stays."), t("{name} is blocked.", who), true);
       }
-      action("Lift login lock", "unlock", "Lift the login lock for " + user.name + "?",
-             "After too many wrong passwords an account is locked for a while. This " +
-             "lets them try again now.");
-      action("Close account", "deactivate", "Close " + user.name + "'s account?",
-             "Only an account with nothing on it can be closed. They're logged out and " +
-             "can't log in.", true);
+      action(t("Lift login lock"), "unlock", t("Lift the login lock for {name}?", who),
+             t("After too many wrong passwords an account is locked for a while. This " +
+               "lets them try again now."), t("The login lock for {name} is lifted.", who));
+      action(t("Close account"), "deactivate", t("Close {name}'s account?", who),
+             t("Only an account with nothing on it can be closed. They're logged out and " +
+               "can't log in."), t("{name}'s account is closed.", who), true);
     } else {
-      action("Reopen account", "reactivate", "Reopen " + user.name + "'s account?",
-             "They'll need a new setup code to choose a password.");
+      action(t("Reopen account"), "reactivate", t("Reopen {name}'s account?", who),
+             t("They'll need a new setup code to choose a password."),
+             t("{name}'s account is reopened.", who));
     }
   }
 
   function askSetupCode(user) {
     var isAdmin = user.role === "admin";
     ask({
-      title: "A new setup code for " + user.name + "?",
-      text: "Their password stops working and they're logged out everywhere until " +
-        "they use the code." + (isAdmin ? " This is an office account: give a reason." : ""),
+      title: t("A new setup code for {name}?", {name: user.name}),
+      text: t("Their password stops working and they're logged out everywhere until " +
+              "they use the code.") +
+        (isAdmin ? " " + t("This is an office account: give a reason.") : ""),
       reason: isAdmin,
-      yes: "Make the code",
+      yes: t("Make the code"),
       act: function (values) {
         var body = values.reason ? {reason: values.reason} : {};
         return post("/api/admin/users/" + user.id + "/setup-code", body).then(function (got) {
@@ -1000,15 +1137,16 @@
   function askReverse(entry, user) {
     var key = newKey();
     ask({
-      title: "Reverse this " + kindText(entry.kind).toLowerCase() + "?",
-      facts: [["When", when(entry.created_at)], ["Amount for " + user.name,
-              signed(entry.amount), "num strong"], ["Transaction", "#" + entry.txn_id, "num"]],
-      text: "Posts its exact opposite, for every account it touched. It can't be undone.",
-      reason: true, yes: "Reverse", danger: true, key: key,
+      title: t("Reverse this transaction ({kind})?", {kind: kindText(entry.kind)}),
+      facts: [[t("When"), when(entry.created_at)],
+              [t("Amount for {name}", {name: user.name}), signed(entry.amount), "num strong"],
+              [t("Transaction"), "#" + entry.txn_id, "num"]],
+      text: t("Posts its exact opposite, for every account it touched. It can't be undone."),
+      reason: true, yes: t("Reverse"), danger: true, key: key,
       act: function (values) {
         return post("/api/admin/reverse", {txn_id: entry.txn_id, reason: values.reason,
                                            idempotency_key: key}).then(function () {
-          notify("Reversed.");
+          notify(t("Reversed."));
           return loadWorker();
         });
       }
@@ -1025,16 +1163,16 @@
     var amount = amountText(byId("deposit-amount").value), into = byId("deposit-into").value;
     var user = userById(worker.id), note = byId("deposit-note").value.trim();
     if (!isLyd(amount)) {
-      showError(byId("deposit-error"), "Type the amount in LYD, like 50 or 12.5.");
+      showError(byId("deposit-error"), t("Type the amount in LYD, like 50 or 12.5."));
       return null;
     }
     var key = newKey();
     ask({
-      title: "Deposit " + typedLyd(amount) + "?",
-      facts: [["For", user.name], ["Amount", typedLyd(amount), "num strong"],
-              ["Received into", into, "num"]].concat(note ? [["Note", note]] : []),
-      text: "Check you have the money before you confirm.",
-      yes: "Confirm deposit", key: key,
+      title: t("Deposit {amount}?", {amount: typedLyd(amount)}),
+      facts: [[t("For"), user.name], [t("Amount"), typedLyd(amount), "num strong"],
+              [t("Received into"), into, "num"]].concat(note ? [[t("Note"), note]] : []),
+      text: t("Check you have the money before you confirm."),
+      yes: t("Confirm deposit"), key: key,
       act: function () {
         var body = {user_id: worker.id, amount: amount, into: into, idempotency_key: key};
         if (note) {
@@ -1042,7 +1180,8 @@
         }
         return post("/api/admin/deposit", body).then(function () {
           byId("deposit-form").reset();
-          notify(typedLyd(amount) + " deposited for " + user.name + ".");
+          notify(t("{amount} deposited for {name}.", {amount: typedLyd(amount),
+                                                      name: user.name}));
           return loadWorker();
         });
       }
@@ -1055,26 +1194,27 @@
     var fee = amountText(byId("withdraw-fee").value), till = byId("withdraw-till").value;
     var user = userById(worker.id), note = byId("withdraw-note").value.trim();
     if (!isLyd(amount)) {
-      showError(byId("withdraw-error"), "Type the amount in LYD, like 50 or 12.5.");
+      showError(byId("withdraw-error"), t("Type the amount in LYD, like 50 or 12.5."));
       return null;
     }
     if (fee !== "" && !/^\d+(\.\d{1,3})?$/.test(fee)) {
-      showError(byId("withdraw-error"), "Type the fee in LYD, like 1.5, or leave it empty.");
+      showError(byId("withdraw-error"),
+                t("Type the fee in LYD, like 1.5, or leave it empty."));
       return null;
     }
     if (!till) {
-      showError(byId("withdraw-error"), "Add a till on the Overview first.");
+      showError(byId("withdraw-error"), t("Add a till on the Overview first."));
       return null;
     }
     var key = newKey();
     var feeDirhams = fee === "" ? 0 : dirhamsOf(fee), gross = dirhamsOf(amount);
     ask({
-      title: "Cash withdrawal of " + typedLyd(amount) + "?",
-      facts: [["For", user.name], ["Taken from their balance", lyd(gross), "num strong"],
-              ["Fee", lyd(feeDirhams), "num"],
-              ["Cash to give them", lyd(gross - feeDirhams), "num strong"],
-              ["From till", till, "num"]].concat(note ? [["Note", note]] : []),
-      yes: "Confirm withdrawal", key: key,
+      title: t("Cash withdrawal of {amount}?", {amount: typedLyd(amount)}),
+      facts: [[t("For"), user.name], [t("Taken from their balance"), lyd(gross), "num strong"],
+              [t("Fee"), lyd(feeDirhams), "num"],
+              [t("Cash to give them"), lyd(gross - feeDirhams), "num strong"],
+              [t("From till"), till, "num"]].concat(note ? [[t("Note"), note]] : []),
+      yes: t("Confirm withdrawal"), key: key,
       act: function () {
         var body = {user_id: worker.id, amount: amount, from_till: till, idempotency_key: key};
         if (feeDirhams) {
@@ -1085,8 +1225,8 @@
         }
         return post("/api/admin/withdraw", body).then(function () {
           byId("withdraw-form").reset();
-          notify("Withdrawal done: give " + user.name + " " + lyd(gross - feeDirhams) +
-                 " in cash.");
+          notify(t("Withdrawal done: give {name} {amount} in cash.",
+                   {name: user.name, amount: lyd(gross - feeDirhams)}));
           return loadWorker();
         });
       }
@@ -1099,7 +1239,19 @@
     var number = byId("whatsapp-number").value.trim();
     return post("/api/admin/users/" + worker.id + "/whatsapp", {whatsapp: number || null})
       .then(function () {
-        done("whatsapp-done", number ? "WhatsApp number saved." : "WhatsApp number removed.");
+        done("whatsapp-done", number ? t("WhatsApp number saved.") :
+             t("WhatsApp number removed."));
+        return loadWorker();
+      });
+  });
+
+  onSubmit("language-form", "language-error", function () {
+    var code = byId("language-choice").value;
+    silence(byId("language-done"));
+    return post("/api/admin/users/" + worker.id + "/language", {language: code})
+      .then(function () {
+        done("language-done", t("Their screens are now in {language}.",
+                                 {language: LANGUAGES[code]}));
         return loadWorker();
       });
   });
@@ -1165,7 +1317,7 @@
       input.inputMode = "decimal";
       input.autocomplete = "off";
       input.maxLength = 20;
-      input.setAttribute("aria-label", "Salary for " + user.name);
+      input.setAttribute("aria-label", t("Salary for {name}", {name: user.name}));
       cell(row, null, "end").appendChild(input);
       rows.appendChild(row);
     });
@@ -1193,14 +1345,15 @@
   function payrollTotal() {
     var lines = payrollLines(), total = byId("payroll-total");
     if (lines === null) {
-      total.textContent = "A salary isn't an amount in LYD.";
+      total.textContent = t("A salary isn't an amount in LYD.");
       return;
     }
     var sum = lines.reduce(function (all, line) {
       return all + dirhamsOf(line.amount);
     }, 0);
-    total.textContent = lines.length ? lines.length + " worker" +
-      (lines.length === 1 ? "" : "s") + ", " + lyd(sum) + " in all." : "";
+    total.textContent = !lines.length ? "" : lines.length === 1 ?
+      t("1 worker, {amount} in all.", {amount: lyd(sum)}) :
+      t("{count} workers, {amount} in all.", {count: lines.length, amount: lyd(sum)});
   }
 
   byId("payroll-rows").addEventListener("input", payrollTotal);
@@ -1216,15 +1369,15 @@
     var lines = payrollLines(), ref = byId("payroll-ref").value.trim();
     var into = byId("payroll-into").value, note = byId("payroll-note").value.trim();
     if (lines === null) {
-      showError(byId("payroll-error"), "Type each salary in LYD, like 1200 or 950.5.");
+      showError(byId("payroll-error"), t("Type each salary in LYD, like 1200 or 950.5."));
       return null;
     }
     if (!lines.length) {
-      showError(byId("payroll-error"), "Type at least one worker's salary.");
+      showError(byId("payroll-error"), t("Type at least one worker's salary."));
       return null;
     }
     if (!ref) {
-      showError(byId("payroll-error"), "Type the payment's reference.");
+      showError(byId("payroll-error"), t("Type the payment's reference."));
       return null;
     }
     var total = lines.reduce(function (all, line) {
@@ -1232,12 +1385,14 @@
     }, 0);
     var key = newKey();
     ask({
-      title: "Pay " + lines.length + " salar" + (lines.length === 1 ? "y" : "ies") + "?",
-      facts: [["Reference", ref], ["Received into", into, "num"],
-              ["Workers", String(lines.length), "num"], ["In all", lyd(total), "num strong"]]
-        .concat(note ? [["Note", note]] : []),
-      text: "Each worker's balance goes up by their salary. A reference can be paid only once.",
-      yes: "Confirm salaries", key: key,
+      title: lines.length === 1 ? t("Pay 1 salary?") :
+        t("Pay {count} salaries?", {count: lines.length}),
+      facts: [[t("Reference"), ref], [t("Received into"), into, "num"],
+              [t("Workers"), String(lines.length), "num"],
+              [t("In all"), lyd(total), "num strong"]].concat(note ? [[t("Note"), note]] : []),
+      text: t("Each worker's balance goes up by their salary. A reference can be paid " +
+              "only once."),
+      yes: t("Confirm salaries"), key: key,
       act: function () {
         var body = {items: lines, batch_ref: ref, into: into, idempotency_key: key};
         if (note) {
@@ -1245,8 +1400,11 @@
         }
         return post("/api/admin/payroll", body).then(function () {
           byId("payroll-ref").value = byId("payroll-note").value = "";
-          notify("Salaries " + ref + " paid: " + lyd(total) + " to " + lines.length +
-                 " worker" + (lines.length === 1 ? "." : "s."));
+          notify(lines.length === 1 ?
+                 t("Salaries {ref} paid: {amount} to 1 worker.", {ref: ref,
+                                                                  amount: lyd(total)}) :
+                 t("Salaries {ref} paid: {amount} to {count} workers.",
+                   {ref: ref, amount: lyd(total), count: lines.length}));
           return loadMoney(true);
         });
       }
@@ -1258,19 +1416,20 @@
     var from = byId("move-from").value, to = byId("move-to").value;
     var amount = amountText(byId("move-amount").value), note = byId("move-note").value.trim();
     if (!from || from === to) {
-      showError(byId("move-error"), "Pick two different places.");
+      showError(byId("move-error"), t("Pick two different places."));
       return null;
     }
     if (!isLyd(amount)) {
-      showError(byId("move-error"), "Type the amount in LYD, like 500.");
+      showError(byId("move-error"), t("Type the amount in LYD, like 500."));
       return null;
     }
     var key = newKey();
     ask({
-      title: "Move " + typedLyd(amount) + "?",
-      facts: [["From", from, "num"], ["To", to, "num"], ["Amount", typedLyd(amount),
-              "num strong"]].concat(note ? [["Note", note]] : []),
-      yes: "Confirm move", key: key,
+      title: t("Move {amount}?", {amount: typedLyd(amount)}),
+      facts: [[t("From"), from, "num"], [t("To"), to, "num"],
+              [t("Amount"), typedLyd(amount), "num strong"]]
+        .concat(note ? [[t("Note"), note]] : []),
+      yes: t("Confirm move"), key: key,
       act: function () {
         var body = {from: from, to: to, amount: amount, idempotency_key: key};
         if (note) {
@@ -1278,7 +1437,8 @@
         }
         return post("/api/admin/move", body).then(function () {
           byId("move-amount").value = byId("move-note").value = "";
-          notify(typedLyd(amount) + " moved from " + from + " to " + to + ".");
+          notify(t("{amount} moved from {from} to {to}.",
+                   {amount: typedLyd(amount), from: from, to: to}));
           return loadMoney(false);
         });
       }
@@ -1291,17 +1451,17 @@
     var amount = amountText(byId("capital-amount").value);
     var note = byId("capital-note").value.trim();
     if (!isLyd(amount)) {
-      showError(byId("capital-error"), "Type the amount in LYD, like 5000.");
+      showError(byId("capital-error"), t("Type the amount in LYD, like 5000."));
       return null;
     }
     var key = newKey();
     ask({
-      title: (putIn ? "Put " + typedLyd(amount) + " into " : "Take " + typedLyd(amount) +
-              " out of ") + code + "?",
-      facts: [["What", putIn ? "The owner's money put in" : "Taken out by the owner"],
-              ["Bank or till", code, "num"], ["Amount", typedLyd(amount), "num strong"]]
-        .concat(note ? [["Note", note]] : []),
-      yes: putIn ? "Confirm: put in" : "Confirm: take out", key: key,
+      title: putIn ? t("Put {amount} into {code}?", {amount: typedLyd(amount), code: code}) :
+        t("Take {amount} out of {code}?", {amount: typedLyd(amount), code: code}),
+      facts: [[t("What"), putIn ? t("The owner's money put in") : t("Taken out by the owner")],
+              [t("Bank or till"), code, "num"], [t("Amount"), typedLyd(amount), "num strong"]]
+        .concat(note ? [[t("Note"), note]] : []),
+      yes: putIn ? t("Confirm: put in") : t("Confirm: take out"), key: key,
       act: function () {
         var body = {code: code, amount: amount, direction: putIn ? "in" : "out",
                     idempotency_key: key};
@@ -1310,7 +1470,8 @@
         }
         return post("/api/admin/capital", body).then(function () {
           byId("capital-amount").value = byId("capital-note").value = "";
-          notify(typedLyd(amount) + (putIn ? " put into " : " taken out of ") + code + ".");
+          notify(putIn ? t("{amount} put into {code}.", {amount: typedLyd(amount), code: code}) :
+                 t("{amount} taken out of {code}.", {amount: typedLyd(amount), code: code}));
           return loadMoney(false);
         });
       }
@@ -1337,7 +1498,7 @@
       input.maxLength = 20;
       input.value = typed[code] || "";
       input.setAttribute("data-code", code);
-      input.setAttribute("aria-label", "Really in " + code);
+      input.setAttribute("aria-label", t("Really in {code}", {code: code}));
       cell(row, null, "end").appendChild(input);
       cell(row, "", "num end difference");
       rows.appendChild(row);
@@ -1358,8 +1519,8 @@
       counts[input.getAttribute("data-code")] = typed;
     });
     if (wrong || !Object.keys(counts).length) {
-      showError(byId("count-error"), wrong ? "Type each amount in LYD, like 1520.5." :
-                "Type what is really there for at least one place.");
+      showError(byId("count-error"), wrong ? t("Type each amount in LYD, like 1520.5.") :
+                t("Type what is really there for at least one place."));
       return null;
     }
     return post("/api/admin/reconcile", {counts: counts}).then(function (answer) {
@@ -1370,16 +1531,18 @@
           return;
         }
         var cellOf = row.querySelector(".difference");
-        cellOf.textContent = r.ok ? "Matches" : signed(r.difference);
+        cellOf.textContent = r.ok ? t("Matches") : signed(r.difference);
         cellOf.className = "num end difference " + (r.ok ? "in" : "out");
         row.children[1].textContent = lyd(r.expected);
         if (!r.ok) {
           bad += 1;
         }
       });
-      result.textContent = bad ? bad + " place" + (bad === 1 ? " doesn't" : "s don't") +
-        " match the books. Count again, then look for what wasn't recorded." :
-        "Everything counted matches the books.";
+      result.textContent = !bad ? t("Everything counted matches the books.") : bad === 1 ?
+        t("1 place doesn't match the books. Count again, then look for what wasn't " +
+          "recorded.") :
+        t("{count} places don't match the books. Count again, then look for what wasn't " +
+          "recorded.", {count: bad});
       result.className = "check-line " + (bad ? "bad" : "good");
       result.hidden = false;
     });
@@ -1393,8 +1556,8 @@
 
   var orders = {limit: PAGE, seq: 0};
 
-  var ORDER_STATUS = {placed: "New", assigned: "With a supplier", paid: "Paid out",
-                      cancelled: "Cancelled"};
+  var ORDER_STATUS = {placed: k("New"), assigned: k("With a supplier"), paid: k("Paid out"),
+                      cancelled: k("Cancelled")};
 
   function supplierName(id) {
     for (var i = 0; i < state.suppliers.length; i += 1) {
@@ -1402,7 +1565,7 @@
         return state.suppliers[i].name;
       }
     }
-    return "supplier " + id;
+    return t("supplier {id}", {id: id});
   }
 
   function supplierChoices(currency) {
@@ -1410,8 +1573,9 @@
       return s.active;
     }).map(function (s) {
       var rate = s.prices && s.prices[currency];
-      return [String(s.id), s.name + (rate ? " (" + rate + " LYD)" : " (no " + currency +
-              " rate: give a one-off rate)")];
+      return [String(s.id), rate ? t("{name} ({rate} LYD)", {name: s.name, rate: rate}) :
+              t("{name} (no {currency} rate: give a one-off rate)",
+                {name: s.name, currency: currency})];
     });
   }
 
@@ -1456,59 +1620,66 @@
       li.setAttribute("data-order", String(order.id));
       var top = make("div", "order-top");
       top.appendChild(make("span", "order-code num", order.receipt_code));
-      top.appendChild(make("span", "tag tag-" + order.status, ORDER_STATUS[order.status] ||
+      top.appendChild(make("span", "tag tag-" + order.status,
+                           has(ORDER_STATUS, order.status) ? t(ORDER_STATUS[order.status]) :
                            order.status));
       li.appendChild(top);
-      li.appendChild(make("p", "strong num", order.foreign_amount + " " + order.currency +
-                          " for " + lyd(order.cost) + " (rate " + order.rate + ")"));
+      li.appendChild(make("p", "strong", t("{amount} {currency} for {cost} (rate {rate})", {
+        amount: order.foreign_amount, currency: order.currency, cost: lyd(order.cost),
+        rate: order.rate})));
       var customer = userById(order.customer_id);
-      var who = make("p", null, "Worker: ");
+      var who = make("p", null, t("Worker:") + " ");
       var link = make("a", null, customer ? customer.name : "#" + order.customer_id);
       link.href = "#/worker/" + order.customer_id;
       link.dir = "auto";
       who.appendChild(link);
       if (order.customer_blocked) {
-        who.appendChild(make("span", "tag tag-bad", " Blocked: held"));
+        who.appendChild(document.createTextNode(" "));
+        who.appendChild(make("span", "tag tag-bad", t("Blocked: held")));
       }
       li.appendChild(who);
-      var to = make("p", null, "Pay to: ");
+      var to = make("p", null, t("Pay to:") + " ");
       to.appendChild(make("bdi", "strong", order.beneficiary_name));
-      to.appendChild(document.createTextNode(", ID "));
+      to.appendChild(document.createTextNode(t(", ID") + " "));
       to.appendChild(make("bdi", "num", order.beneficiary_id));
       li.appendChild(to);
       if (order.supplier_id) {
-        li.appendChild(make("p", null, "Supplier: " + supplierName(order.supplier_id) +
-                            (order.supplier_cost ? ", costs us " + lyd(order.supplier_cost) +
-                             " (rate " + order.supplier_rate + ")" : "")));
+        li.appendChild(make("p", null, order.supplier_cost ?
+          t("Supplier: {name}, costs us {cost} (rate {rate})", {
+            name: supplierName(order.supplier_id), cost: lyd(order.supplier_cost),
+            rate: order.supplier_rate}) :
+          t("Supplier: {name}", {name: supplierName(order.supplier_id)})));
       }
       if (order.payout_ref) {
-        li.appendChild(make("p", "num", "Payout reference: " + order.payout_ref));
+        li.appendChild(make("p", null, t("Payout reference: {ref}", {ref: order.payout_ref})));
       }
-      li.appendChild(make("p", "muted small", "Placed " + when(order.created_at) +
-                          (order.paid_at ? " · paid " + when(order.paid_at) : "") +
-                          (order.cancelled_at ? " · cancelled " + when(order.cancelled_at) :
-                           "")));
-      var actions = make("div", "button-row");
+      li.appendChild(make("p", "muted small", [
+        t("Placed {time}", {time: when(order.created_at)}),
+        order.paid_at ? t("paid {time}", {time: when(order.paid_at)}) : "",
+        order.cancelled_at ? t("cancelled {time}", {time: when(order.cancelled_at)}) : ""
+      ].filter(Boolean).join(" · ")));
+      var actions = make("div", "button-row"), code = {code: order.receipt_code};
       if (order.status === "placed") {
-        actions.appendChild(button("Give to a supplier", "primary", function () {
+        actions.appendChild(button(t("Give to a supplier"), "primary", function () {
           askAssign(order);
         }));
-        actions.appendChild(button("Mark paid", "secondary", function () {
+        actions.appendChild(button(t("Mark paid"), "secondary", function () {
           askPaid(order);
         }));
-        actions.appendChild(button("Cancel and refund", "danger-outline", function () {
-          askOrderReason(order, "cancel", "Cancel order " + order.receipt_code + "?",
-                         lyd(order.cost) + " goes back to the worker's balance.",
-                         "Cancel and refund");
+        actions.appendChild(button(t("Cancel and refund"), "danger-outline", function () {
+          askOrderReason(order, "cancel", t("Cancel order {code}?", code),
+                         t("{amount} goes back to the worker's balance.",
+                           {amount: lyd(order.cost)}),
+                         t("Cancel and refund"));
         }));
       } else if (order.status === "assigned") {
-        actions.appendChild(button("Mark paid", "primary", function () {
+        actions.appendChild(button(t("Mark paid"), "primary", function () {
           askPaid(order);
         }));
-        actions.appendChild(button("Take back from supplier", "secondary", function () {
-          askOrderReason(order, "unassign", "Take order " + order.receipt_code + " back?",
-                         "It becomes new again, for another supplier or a refund.",
-                         "Take back");
+        actions.appendChild(button(t("Take back from supplier"), "secondary", function () {
+          askOrderReason(order, "unassign", t("Take order {code} back?", code),
+                         t("It becomes new again, for another supplier or a refund."),
+                         t("Take back"));
         }));
       }
       if (actions.firstChild) {
@@ -1521,28 +1692,29 @@
   }
 
   function orderFacts(order) {
-    return [["Receipt", order.receipt_code, "num"],
-            ["Amount", order.foreign_amount + " " + order.currency, "num strong"],
-            ["Pay to", order.beneficiary_name + ", ID " + order.beneficiary_id]];
+    return [[t("Receipt"), order.receipt_code, "num"],
+            [t("Amount"), order.foreign_amount + " " + order.currency, "num strong"],
+            [t("Pay to"), t("{name}, ID {id}", {name: order.beneficiary_name,
+                                                id: order.beneficiary_id})]];
   }
 
   function askAssign(order) {
     var choices = supplierChoices(order.currency);
     if (!choices.length) {
-      notify("Add a supplier first, on the Suppliers screen.");
+      notify(t("Add a supplier first, on the Suppliers screen."));
       return;
     }
     ask({
-      title: "Give order " + order.receipt_code + " to a supplier?",
-      facts: orderFacts(order), supplier: choices, rate: true, yes: "Give to supplier",
+      title: t("Give order {code} to a supplier?", {code: order.receipt_code}),
+      facts: orderFacts(order), supplier: choices, rate: true, yes: t("Give to supplier"),
       act: function (values) {
         var body = {supplier_id: values.supplier_id};
         if (values.rate) {
           body.rate = values.rate;
         }
         return post("/api/admin/orders/" + order.id + "/assign", body).then(function () {
-          notify("Order " + order.receipt_code + " is with " +
-                 supplierName(values.supplier_id) + ".");
+          notify(t("Order {code} is with {name}.", {code: order.receipt_code,
+                                                     name: supplierName(values.supplier_id)}));
           return loadOrders();
         });
       }
@@ -1553,16 +1725,16 @@
     var needsSupplier = !order.supplier_id;
     var choices = needsSupplier ? supplierChoices(order.currency) : null;
     if (needsSupplier && !choices.length) {
-      notify("Add a supplier first, on the Suppliers screen.");
+      notify(t("Add a supplier first, on the Suppliers screen."));
       return;
     }
     ask({
-      title: "Order " + order.receipt_code + " paid out?",
+      title: t("Order {code} paid out?", {code: order.receipt_code}),
       facts: orderFacts(order).concat(needsSupplier ? [] :
-                                      [["Supplier", supplierName(order.supplier_id)]]),
-      text: "Only when the supplier confirmed the beneficiary got the money. A paid " +
-        "order is final.",
-      supplier: choices, rate: needsSupplier, ref: true, yes: "Mark paid",
+                                      [[t("Supplier"), supplierName(order.supplier_id)]]),
+      text: t("Only when the supplier confirmed the beneficiary got the money. A paid " +
+              "order is final."),
+      supplier: choices, rate: needsSupplier, ref: true, yes: t("Mark paid"),
       act: function (values) {
         var body = {receipt_code: order.receipt_code, payout_ref: values.payout_ref};
         if (needsSupplier) {
@@ -1572,7 +1744,7 @@
           }
         }
         return post("/api/admin/orders/paid", body).then(function () {
-          notify("Order " + order.receipt_code + " is paid.");
+          notify(t("Order {code} is paid.", {code: order.receipt_code}));
           return loadOrders();
         });
       }
@@ -1586,8 +1758,9 @@
       act: function (values) {
         return post("/api/admin/orders/" + order.id + "/" + path, {reason: values.reason})
           .then(function () {
-            notify(path === "cancel" ? "Order " + order.receipt_code + " is cancelled and " +
-                   "refunded." : "Order " + order.receipt_code + " is new again.");
+            notify(path === "cancel" ?
+                   t("Order {code} is cancelled and refunded.", {code: order.receipt_code}) :
+                   t("Order {code} is new again.", {code: order.receipt_code}));
             return loadOrders();
           });
       }
@@ -1605,13 +1778,13 @@
     var code = byId("paid-code").value.trim().toUpperCase(), ref = byId("paid-ref").value;
     silence(byId("paid-done"));
     if (!code || !filled(ref)) {
-      showError(byId("paid-error"), "Type the receipt code and the payout reference.");
+      showError(byId("paid-error"), t("Type the receipt code and the payout reference."));
       return null;
     }
     return post("/api/admin/orders/paid", {receipt_code: code, payout_ref: ref.trim()})
       .then(function () {
         byId("paid-form").reset();
-        done("paid-done", "Order " + code + " is paid.");
+        done("paid-done", t("Order {code} is paid.", {code: code}));
         return loadOrders();
       });
   });
@@ -1645,24 +1818,26 @@
       var row = make("tr");
       cell(row, c.code, "num strong");
       cell(row, null).appendChild(make("span", c.active ? "tag tag-good" : "tag tag-off",
-                                       c.active ? (c.price ? "Yes" : "No price yet") :
-                                       "No, switched off"));
+                                       c.active ? (c.price ? t("Yes") : t("No price yet")) :
+                                       t("No, switched off")));
       cell(row, c.price ? c.price.rate : "—", "num end");
       cell(row, c.price ? when(c.price.set_at) : "", "nowrap");
       var actions = cell(row, null, "end");
-      actions.appendChild(button(c.active ? "Switch off" : "Switch on",
-                                 c.active ? "danger-outline" : "secondary", function () {
+      var label = c.active ? t("Switch off") : t("Switch on");
+      actions.appendChild(button(label, c.active ? "danger-outline" : "secondary", function () {
         ask({
-          title: (c.active ? "Switch off " : "Switch on ") + c.code + "?",
-          text: c.active ? "Workers stop seeing its price and can't order it, not even " +
-            "with a quote they already have. Orders already placed aren't touched." :
-            "Workers see its price and can order it again.",
-          reason: true, yes: c.active ? "Switch off" : "Switch on", danger: c.active,
+          title: c.active ? t("Switch off {code}?", {code: c.code}) :
+            t("Switch on {code}?", {code: c.code}),
+          text: c.active ? t("Workers stop seeing its price and can't order it, not even " +
+            "with a quote they already have. Orders already placed aren't touched.") :
+            t("Workers see its price and can order it again."),
+          reason: true, yes: label, danger: c.active,
           act: function (values) {
             return post("/api/admin/currencies/active", {code: c.code, active: !c.active,
                                                          reason: values.reason})
               .then(function () {
-                notify(c.code + (c.active ? " is switched off." : " is switched on."));
+                notify(c.active ? t("{code} is switched off.", {code: c.code}) :
+                       t("{code} is switched on.", {code: c.code}));
                 return loadCurrencies().then(drawPrices);
               });
           }
@@ -1684,16 +1859,16 @@
     var wrong = byId("price-void").checked;
     silence(byId("price-done"));
     if (!currency || !/^\d+(\.\d{1,6})?$/.test(rate) || !/[1-9]/.test(rate)) {
-      showError(byId("price-error"), "Type the price in LYD for 1 " + (currency || "unit") +
-                ", like 7.85.");
+      showError(byId("price-error"), t("Type the price in LYD for 1 {currency}, like 7.85.",
+                                       {currency: currency || "?"}));
       return null;
     }
     return post("/api/admin/prices", {currency: currency, rate: rate, void_quotes: wrong})
       .then(function () {
         byId("price-rate").value = "";
         byId("price-void").checked = false;
-        done("price-done", currency + " is now " + rate + " LYD." +
-             (wrong ? " Quotes given before can't be used." : ""));
+        done("price-done", t("{currency} is now {rate} LYD.", {currency: currency, rate: rate}) +
+             (wrong ? " " + t("Quotes given before can't be used.") : ""));
         return loadCurrencies().then(drawPrices);
       });
   });
@@ -1702,12 +1877,13 @@
     var code = byId("currency-code").value.trim().toUpperCase();
     silence(byId("currency-done"));
     if (!/^[A-Z]{3}$/.test(code)) {
-      showError(byId("currency-error"), "Type the 3 letters of the currency, like USD.");
+      showError(byId("currency-error"), t("Type the 3 letters of the currency, like USD."));
       return null;
     }
     return post("/api/admin/currencies", {code: code}).then(function () {
       byId("currency-code").value = "";
-      done("currency-done", code + " is added. Set its price so workers can order it.");
+      done("currency-done",
+           t("{code} is added. Set its price so workers can order it.", {code: code}));
       return loadCurrencies().then(function () {
         drawPrices();
         byId("price-currency").value = code;
@@ -1721,7 +1897,7 @@
     var codes = Object.keys(prices || {});
     return codes.length ? codes.map(function (c) {
       return c + " " + prices[c];
-    }).join(", ") : "None yet";
+    }).join(", ") : t("None yet");
   }
 
   function openSuppliers() {
@@ -1742,7 +1918,7 @@
       cell(row, null).appendChild(link);
       cell(row, s.country || "").dir = "auto";
       cell(row, null).appendChild(make("span", s.active ? "tag tag-good" : "tag tag-off",
-                                       s.active ? "In use" : "Not in use"));
+                                       s.active ? t("In use") : t("Not in use")));
       cell(row, ratesText(s.prices), "num");
       cell(row, lyd(s.balance.dirhams), "num end");
       rows.appendChild(row);
@@ -1758,7 +1934,7 @@
     var name = byId("supplier-add-name").value, country = byId("supplier-add-country").value;
     silence(byId("supplier-add-done"));
     if (!filled(name)) {
-      showError(byId("supplier-add-error"), "Type the supplier's name.");
+      showError(byId("supplier-add-error"), t("Type the supplier's name."));
       return null;
     }
     var body = {name: name.trim()};
@@ -1767,7 +1943,8 @@
     }
     return post("/api/admin/suppliers", body).then(function () {
       byId("supplier-add-form").reset();
-      done("supplier-add-done", body.name + " is added. Open it to set their rates.");
+      done("supplier-add-done",
+           t("{name} is added. Open it to set their rates.", {name: body.name}));
       return loadSuppliers().then(drawSuppliers);
     });
   });
@@ -1794,7 +1971,7 @@
         }
         var s = state.suppliers.filter(function (one) { return one.id === id; })[0];
         if (!s) {
-          byId("supplier-name").textContent = "No such supplier";
+          byId("supplier-name").textContent = t("No such supplier");
           return;
         }
         drawSupplier(s, got[3]);
@@ -1811,10 +1988,10 @@
     var status = byId("supplier-status");
     clear(status);
     status.appendChild(make("span", s.active ? "tag tag-good" : "tag tag-off",
-                            s.active ? "In use" : "Not in use"));
+                            s.active ? t("In use") : t("Not in use")));
     var owed = statement.balance.dirhams;
-    byId("supplier-balance").textContent = owed < 0 ? lyd(-owed) + " paid in advance" :
-      lyd(owed);
+    byId("supplier-balance").textContent = owed < 0 ?
+      t("{amount} paid in advance", {amount: lyd(-owed)}) : lyd(owed);
     byId("supplier-rates").textContent = ratesText(s.prices);
     fillSelect(byId("supplier-price-currency"), currencyChoices());
     byId("supplier-price-submit").disabled = !state.currencies.length;
@@ -1822,17 +1999,19 @@
 
     var box = byId("supplier-actions");
     clear(box);
-    box.appendChild(button(s.active ? "Stop using them" : "Use them again",
+    box.appendChild(button(s.active ? t("Stop using them") : t("Use them again"),
                            s.active ? "danger-outline" : "secondary", function () {
       ask({
-        title: (s.active ? "Stop using " : "Use ") + s.name + (s.active ? "?" : " again?"),
-        text: s.active ? "New orders can't be given to them. Orders they have stay theirs." :
-          "Orders can be given to them again.",
-        reason: true, yes: s.active ? "Stop using" : "Use again", danger: s.active,
+        title: s.active ? t("Stop using {name}?", {name: s.name}) :
+          t("Use {name} again?", {name: s.name}),
+        text: s.active ? t("New orders can't be given to them. Orders they have stay " +
+                           "theirs.") : t("Orders can be given to them again."),
+        reason: true, yes: s.active ? t("Stop using") : t("Use again"), danger: s.active,
         act: function (values) {
           return post("/api/admin/suppliers/" + s.id + "/active",
                       {active: !s.active, reason: values.reason}).then(function () {
-            notify(s.name + (s.active ? " is no longer used." : " is in use again."));
+            notify(s.active ? t("{name} is no longer used.", {name: s.name}) :
+                   t("{name} is in use again.", {name: s.name}));
             return loadSupplier();
           });
         }
@@ -1868,13 +2047,15 @@
     var rate = amountText(byId("supplier-price-rate").value);
     silence(byId("supplier-price-done"));
     if (!currency || !/^\d+(\.\d{1,6})?$/.test(rate) || !/[1-9]/.test(rate)) {
-      showError(byId("supplier-price-error"), "Type their rate in LYD for 1 unit, like 7.80.");
+      showError(byId("supplier-price-error"),
+                t("Type their rate in LYD for 1 unit, like 7.80."));
       return null;
     }
     return post("/api/admin/suppliers/" + supplier.id + "/price",
                 {currency: currency, rate: rate}).then(function () {
       byId("supplier-price-rate").value = "";
-      done("supplier-price-done", "Their " + currency + " rate is now " + rate + " LYD.");
+      done("supplier-price-done", t("Their {currency} rate is now {rate} LYD.",
+                                    {currency: currency, rate: rate}));
       return loadSupplier();
     });
   });
@@ -1884,20 +2065,20 @@
     var reference = byId("pay-reference").value.trim(), note = byId("pay-note").value.trim();
     var s = state.suppliers.filter(function (one) { return one.id === supplier.id; })[0];
     if (!isLyd(amount)) {
-      showError(byId("pay-error"), "Type the amount in LYD, like 5000.");
+      showError(byId("pay-error"), t("Type the amount in LYD, like 5000."));
       return null;
     }
     if (!reference) {
-      showError(byId("pay-error"), "Type the payment's reference.");
+      showError(byId("pay-error"), t("Type the payment's reference."));
       return null;
     }
     var key = newKey();
     ask({
-      title: "Pay " + s.name + " " + typedLyd(amount) + "?",
-      facts: [["To", s.name], ["Amount", typedLyd(amount), "num strong"],
-              ["Paid from", from, "num"], ["Reference", reference]]
-        .concat(note ? [["Note", note]] : []),
-      yes: "Confirm payment", key: key,
+      title: t("Pay {name} {amount}?", {name: s.name, amount: typedLyd(amount)}),
+      facts: [[t("To"), s.name], [t("Amount"), typedLyd(amount), "num strong"],
+              [t("Paid from"), from, "num"], [t("Reference"), reference]]
+        .concat(note ? [[t("Note"), note]] : []),
+      yes: t("Confirm payment"), key: key,
       act: function () {
         var body = {amount: amount, from: from, reference: reference, idempotency_key: key};
         if (note) {
@@ -1905,7 +2086,7 @@
         }
         return post("/api/admin/suppliers/" + supplier.id + "/pay", body).then(function () {
           byId("pay-form").reset();
-          notify(typedLyd(amount) + " paid to " + s.name + ".");
+          notify(t("{amount} paid to {name}.", {amount: typedLyd(amount), name: s.name}));
           return loadSupplier();
         });
       }
@@ -1918,18 +2099,20 @@
   var log = {limit: PAGE, seq: 0};
 
   var ACTION = {
-    create_user: "Made an account", set_whatsapp: "Changed WhatsApp",
-    block_user: "Blocked", unblock_user: "Unblocked", deactivate_user: "Closed an account",
-    reactivate_user: "Reopened an account", unlock_login: "Lifted a login lock",
-    issue_setup_code: "Gave a setup code", setup_code_used: "Setup code used",
-    assign_supplier: "Gave an order to a supplier", unassign_supplier: "Took an order back",
-    cancel_order: "Cancelled an order", mark_paid: "Marked an order paid",
-    deposit: "Deposit", payroll: "Salaries", capital: "Capital", move_money: "Moved money",
-    withdraw_cash: "Cash withdrawal", reverse: "Reversed", pay_supplier: "Paid a supplier",
-    add_supplier: "Added a supplier", set_supplier_price: "Set a supplier's rate",
-    set_supplier_active: "Supplier on/off", add_till: "Added a till",
-    add_currency: "Added a currency", set_currency_active: "Currency on/off",
-    set_price: "Set a price"
+    create_user: k("Made an account"), set_whatsapp: k("Changed WhatsApp"),
+    set_language: k("Changed the language"), block_user: k("Blocked"),
+    unblock_user: k("Unblocked"), deactivate_user: k("Closed an account"),
+    reactivate_user: k("Reopened an account"), unlock_login: k("Lifted a login lock"),
+    issue_setup_code: k("Gave a setup code"), setup_code_used: k("Setup code used"),
+    assign_supplier: k("Gave an order to a supplier"),
+    unassign_supplier: k("Took an order back"), cancel_order: k("Cancelled an order"),
+    mark_paid: k("Marked an order paid"), deposit: k("Deposit"), payroll: k("Salaries"),
+    capital: k("Owner's money"), move_money: k("Moved money"),
+    withdraw_cash: k("Cash withdrawal"), reverse: k("Reversed"),
+    pay_supplier: k("Paid a supplier"), add_supplier: k("Added a supplier"),
+    set_supplier_price: k("Set a supplier's rate"), set_supplier_active: k("Supplier on/off"),
+    add_till: k("Added a till"), add_currency: k("Added a currency"),
+    set_currency_active: k("Currency on/off"), set_price: k("Set a price")
   };
 
   function targetText(entry) {
@@ -1939,13 +2122,13 @@
     var id = Number(entry.target);
     if (entry.target_kind === "user") {
       var user = userById(id);
-      return user ? user.name : "account " + entry.target;
+      return user ? user.name : t("account {id}", {id: entry.target});
     }
     if (entry.target_kind === "order") {
-      return "order " + entry.target;
+      return t("order {id}", {id: entry.target});
     }
     if (entry.target_kind === "transaction") {
-      return "transaction #" + entry.target;
+      return t("transaction #{id}", {id: entry.target});
     }
     if (entry.target_kind === "supplier") {
       return supplierName(id);
@@ -1955,9 +2138,18 @@
 
   var MONEY_DETAILS = {amount: true, gross: true, fee: true, margin: true,
                        supplier_cost: true, cost: true, total: true};
-  var DETAIL_NAME = {user_id: "worker", supplier_id: "supplier",
-                     customer_blocked: "worker blocked", void_quotes: "old quotes voided",
-                     payout_ref: "payout reference"};
+  var DETAIL_NAME = {
+    user_id: k("worker"), supplier_id: k("supplier"), customer_blocked: k("worker blocked"),
+    void_quotes: k("old quotes voided"), payout_ref: k("payout reference"),
+    amount: k("amount"), gross: k("amount"), fee: k("fee"), margin: k("margin"),
+    supplier_cost: k("supplier cost"), total: k("total"), reason: k("reason"),
+    role: k("role"), phone: k("phone"), whatsapp: k("WhatsApp"), language: k("language"),
+    rate: k("rate"), currency: k("currency"), name: k("name"), country: k("country"),
+    into: k("into"), till: k("till"), source: k("from"), destination: k("to"),
+    direction: k("direction"), batch_ref: k("reference"), reference: k("reference"),
+    workers: k("workers"), reverses: k("reverses"), active: k("in use"),
+    receipt: k("receipt"), code: k("code")
+  };
 
   function detailText(details) {
     return Object.keys(details || {}).filter(function (key) {
@@ -1971,11 +2163,12 @@
       } else if (key === "supplier_id") {
         value = supplierName(value);
       } else if (value === true || value === false) {
-        value = value ? "yes" : "no";
+        value = value ? t("yes") : t("no");
       } else if (typeof value === "object") {
         value = JSON.stringify(value);
       }
-      return (DETAIL_NAME[key] || key.replace(/_/g, " ")) + ": " + value;
+      return (has(DETAIL_NAME, key) ? t(DETAIL_NAME[key]) : key.replace(/_/g, " ")) + ": " +
+        value;
     }).join(" · ");
   }
 
@@ -2002,7 +2195,8 @@
         var admin = userById(entry.admin_id);
         cell(row, admin ? admin.name : entry.admin_id === null ? "—" : "#" + entry.admin_id)
           .dir = "auto";
-        var what = cell(row, ACTION[entry.action] || entry.action);
+        var what = cell(row, has(ACTION, entry.action) ? t(ACTION[entry.action]) :
+                        entry.action);
         var target = targetText(entry);
         if (target) {
           what.appendChild(make("span", "muted small detail", target)).dir = "auto";
@@ -2046,6 +2240,8 @@
     supplier: openSupplier,
     log: openLog,
     account: function () {
+      byId("my-language").value = state.me.language;
+      silence(byId("my-language-error"));
       silence(byId("password-error"));
       silence(byId("password-done"));
       silence(byId("account-error"));
@@ -2054,5 +2250,6 @@
   };
 
   window.addEventListener("hashchange", route);
+  wireLanguageSwitch();
   start();
 }());

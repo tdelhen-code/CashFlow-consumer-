@@ -14,6 +14,7 @@ from app import auth as A
 from app import ledger as L
 from app import orders as O
 from app import web
+from tests.test_admin_pages import admin_strings
 from tests.test_browser import CHROMIUM, SKIP, WAIT_MS, _PageLog, _Recorder
 
 try:
@@ -471,6 +472,112 @@ class AdminBrowserTests(unittest.TestCase):
         self.assert_text("#count-result", "1 place doesn't match the books. Count again, "
                                           "then look for what wasn't recorded.")
         self.assertEqual(self.count("SELECT COUNT(*) FROM transactions"), before)
+
+    def office_admin(self, name, language):
+        """Another admin, with their own phone and language."""
+        phone = f"094{next(PHONES):07d}"
+        uid = L.create_user(self.conn, "admin", name, phone, language, admin_id=1)
+        code = A.issue_setup_code(self.conn, uid, admin_id=1, reason="new office staff")
+        A.set_password_with_code(self.conn, phone, code, PASSWORD)
+        return uid, phone
+
+    def assert_all_translated(self, page, language):
+        """Every marked text of the page is shown in the language, none left
+        in English (a text the same in both, such as "WhatsApp", aside)."""
+        table = admin_strings()[language]
+        shown = page.evaluate("""Array.from(document.querySelectorAll('[data-t]'))
+            .map(e => [e.getAttribute('data-en'), e.textContent])""")
+        self.assertGreater(len(shown), 200)
+        for english, text in shown:
+            self.assertEqual(text, table[english], english)
+
+    def test_an_arabic_admin_works_right_to_left(self):
+        _, phone = self.office_admin("Salem", "ar")
+        uid, _ = self.worker("Aisha")
+        ar = admin_strings()["ar"]
+        page = self.new_page(PHONE)
+        self.log_in(page, phone, PASSWORD)
+        self.assertEqual(page.get_attribute("html", "lang"), "ar")
+        self.assertEqual(page.get_attribute("html", "dir"), "rtl")
+        self.assert_all_translated(page, "ar")
+        self.assert_text("#nav a[data-nav='workers']", ar["Workers"], page)
+        self.assertEqual(page.title(), ar["Al Naseem Wallet: Office"])
+        self.open(f"#/worker/{uid}", "worker", page)
+        page.fill("#deposit-amount", "40")
+        self.click("#deposit-submit", page)
+        # Each value isolated (U+2068 to U+2069), so it keeps its own order.
+        self.assertEqual(page.text_content("#ask-title"),
+                         "إيداع \u2068\u206840.000\u2069 د.ل\u2069؟")
+        self.click("#ask-yes", page)
+
+        def plain(selector):
+            return page.text_content(selector).replace("\u2068", "").replace("\u2069", "")
+        self.assertIn("40.000 د.ل", plain("#notice"))
+        self.assertEqual(plain("#worker-balance"), "40.000 د.ل")
+        self.assertNotRegex(page.text_content("#worker-rows"), "[٠-٩]")   # digits 0-9
+        # The wallet's own refusal is shown in English, said to be so.
+        page.fill("#withdraw-amount", "500")
+        self.click("#withdraw-submit", page)
+        self.click("#ask-yes", page)
+        expect(page.locator("#ask-error")).to_contain_text("رد المحفظة (بالإنجليزية)")
+        self.click("#ask-no", page)
+        for hash_, screen in (("#/overview", "overview"), ("#/money", "money"),
+                              ("#/orders", "orders"), ("#/log", "log")):
+            self.open(hash_, screen, page)
+            self.assert_fits(page)
+
+    def test_the_office_screens_change_language_from_the_account(self):
+        uid, phone = self.office_admin("Nour", "en")
+        page = self.page
+        self.log_in(page, phone, PASSWORD)
+        self.open("#/account", "account")
+        page.select_option("#my-language", "fr")
+        self.click("#my-language-submit")
+        self.assertEqual(page.get_attribute("html", "lang"), "fr")
+        self.assert_all_translated(page, "fr")
+        self.assert_text("#notice", "Les écrans du bureau sont maintenant en Français.")
+        self.assertEqual(self.count("SELECT language FROM users WHERE id = ?", uid), "fr")
+        # Logged out, the screens stay French; logged in again, still French.
+        self.click("#logout")
+        self.on_screen("login")
+        self.assertEqual(page.get_attribute("html", "lang"), "fr")
+        expect(page.locator("#lang-fr")).to_have_attribute("aria-pressed", "true")
+        self.log_in(page, phone, PASSWORD)
+        self.assertEqual(page.get_attribute("html", "lang"), "fr")
+
+    def test_a_workers_language_is_set_on_their_page(self):
+        uid, _ = self.worker("Hamza")
+        self.log_in()
+        page = self.page
+        self.open(f"#/worker/{uid}", "worker")
+        self.assert_text("#worker-language", "English")
+        page.select_option("#language-choice", "ar")
+        self.click("#language-submit")
+        self.assert_text("#language-done", "Their screens are now in العربية.")
+        self.assert_text("#worker-language", "العربية")
+        self.assertEqual(self.count("SELECT language FROM users WHERE id = ?", uid), "ar")
+
+    def test_the_login_screen_switches_language(self):
+        page = self.page
+        page.goto(self.base + "/admin")
+        self.on_screen("login")
+        self.assertEqual(page.get_attribute("html", "lang"), "en")
+        self.click("#lang-ar")
+        self.assertEqual(page.get_attribute("html", "dir"), "rtl")
+        self.assert_text("#login-title", admin_strings()["ar"]["Office log in"])
+        self.click("#login-submit")
+        self.assert_text("#login-error", admin_strings()["ar"][
+            "Fill in your phone number and password."])
+        self.click("#lang-fr")
+        self.assert_text("#login-title", admin_strings()["fr"]["Office log in"])
+        # A browser in Arabic opens the login in Arabic.
+        context = self.browser.new_context(viewport=DESK, locale="ar-LY")
+        self.addCleanup(context.close)
+        arabic = context.new_page()
+        self.logs[arabic] = _PageLog(arabic, True)
+        arabic.goto(self.base + "/admin")
+        self.on_screen("login", arabic)
+        self.assertEqual(arabic.get_attribute("html", "lang"), "ar")
 
     def test_an_ended_session_goes_back_to_the_login(self):
         self.log_in()

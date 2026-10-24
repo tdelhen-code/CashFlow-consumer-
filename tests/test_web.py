@@ -1104,6 +1104,8 @@ class WebTests(unittest.TestCase):
             "POST /api/admin/users/<id>/setup-code": (f"{user}/setup-code", reason),
             "POST /api/admin/users/<id>/whatsapp": (f"{user}/whatsapp",
                                                    {"whatsapp": "+201001234567"}),
+            "POST /api/admin/users/<id>/language": (f"{user}/language",
+                                                   {"language": "fr"}),
             "POST /api/admin/users/<id>/block": (f"{user}/block", reason),
             "POST /api/admin/users/<id>/unblock": (f"{user}/unblock", reason),
             "POST /api/admin/users/<id>/deactivate": (f"{user}/deactivate", reason),
@@ -1158,6 +1160,23 @@ class WebTests(unittest.TestCase):
             path, body = (request, None) if method == "GET" else request
             out[name] = (method, path, None if body is None else dict(body, admin_id=1))
         return out
+
+    def test_an_accounts_language_can_be_changed(self):
+        ali_id, ali = self.new_worker("Ali", "0921111111", "Garden-Lamp-4821")
+        path = f"/api/admin/users/{ali_id}/language"
+        self.assertEqual(self.admin.post(path, {"language": "ar"}), (200, {"ok": True}))
+        self.assertEqual(ali.get("/api/me")[1]["language"], "ar")
+        self.assertEqual(self.admin.post(path, {"language": "ar"})[0], 200)    # no change
+        for wrong in ("de", "", "AR"):
+            self.assertEqual(self.admin.post(path, {"language": wrong})[0], 400, wrong)
+        self.assertEqual(self.admin.post(path, {})[0], 400)
+        self.assertEqual(ali.post(path, {"language": "fr"})[0], 403)
+        # The admin's own too.
+        self.assertEqual(self.admin.post("/api/admin/users/1/language", {"language": "fr"})[0],
+                         200)
+        self.assertEqual(self.admin.get("/api/admin/me")[1]["language"], "fr")
+        logged = self.admin.get(f"/api/admin/log?action=set_language&kind=user&target={ali_id}")
+        self.assertEqual([e["details"] for e in logged[1]["entries"]], [{"language": "ar"}])
 
     def test_what_the_office_screens_read(self):
         ali_id, ali = self.new_worker("Ali", "0921111111", "Garden-Lamp-4821")

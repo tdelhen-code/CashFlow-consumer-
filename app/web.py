@@ -101,6 +101,7 @@ STATIC_FILES = {
     "/static/icon.svg": "icon.svg",
     "/admin": "admin.html",
     "/static/admin.js": "admin.js",
+    "/static/admin-strings.js": "admin-strings.js",
     "/static/admin.css": "admin.css",
 }
 # Fixed here, not taken from the system's table, which can say text/plain for
@@ -623,6 +624,12 @@ def admin_whatsapp(app, conn, req):
         raise HttpError(400, "'whatsapp' is required (null or \"\" removes the number)")
     L.set_whatsapp(conn, req.int("id"), req.get("whatsapp", required=False),
                    admin_id=admin)
+    return {"ok": True}
+
+
+@route("POST", "/api/admin/users/<id>/language")
+def admin_language(app, conn, req):
+    L.set_language(conn, req.int("id"), req.get("language"), admin_id=_admin(conn, req))
     return {"ok": True}
 
 

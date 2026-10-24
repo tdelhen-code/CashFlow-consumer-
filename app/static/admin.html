@@ -6,36 +6,43 @@
 <meta name="color-scheme" content="light dark">
 <meta name="format-detection" content="telephone=no">
 <meta name="robots" content="noindex">
-<title>Al Naseem Wallet: Office</title>
+<title data-t>Al Naseem Wallet: Office</title>
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/admin.css">
+<script src="/static/admin-strings.js" defer></script>
 <script src="/static/admin.js" defer></script>
 </head>
 <!--
   The office's screens: one page, one <section> per screen, picked by the
   address's #/<screen> (#/worker/<id> and #/supplier/<id> for one of them).
-  admin.js fills in everything the wallet knows; the texts written here are
-  the office's (English only for now). The ids are what admin.js and
-  tests/test_browser.py rely on.
+  admin.js fills in everything the wallet knows. The texts written here are
+  English; each element marked data-t (data-t-label: its aria-label) is
+  shown in the admin's language from admin-strings.js. The ids are what
+  admin.js and tests/test_admin_browser.py rely on.
 -->
 <body class="office" data-screen="loading" data-pending="0">
 
 <header class="bar">
   <span class="bar-icon" aria-hidden="true"></span>
-  <span class="bar-title">Al Naseem Wallet: Office</span>
+  <span class="bar-title" data-t>Al Naseem Wallet: Office</span>
   <span id="bar-who" class="bar-who muted small" hidden></span>
+  <div id="lang-switch" class="lang-switch" role="group" aria-label="Language" data-t-label hidden>
+    <button id="lang-en" type="button" class="lang-button" data-lang="en" lang="en" dir="ltr"></button>
+    <button id="lang-ar" type="button" class="lang-button" data-lang="ar" lang="ar" dir="rtl"></button>
+    <button id="lang-fr" type="button" class="lang-button" data-lang="fr" lang="fr" dir="ltr"></button>
+  </div>
 </header>
 
-<nav id="nav" class="office-nav" aria-label="Office menu" hidden>
-  <a data-nav="overview" href="#/overview">Overview</a>
-  <a data-nav="workers" href="#/workers">Workers</a>
-  <a data-nav="money" href="#/money">Money</a>
-  <a data-nav="orders" href="#/orders">Orders</a>
-  <a data-nav="prices" href="#/prices">Prices</a>
-  <a data-nav="suppliers" href="#/suppliers">Suppliers</a>
-  <a data-nav="log" href="#/log">Log</a>
-  <a data-nav="account" href="#/account">Account</a>
+<nav id="nav" class="office-nav" aria-label="Office menu" data-t-label hidden>
+  <a data-nav="overview" href="#/overview" data-t>Overview</a>
+  <a data-nav="workers" href="#/workers" data-t>Workers</a>
+  <a data-nav="money" href="#/money" data-t>Money</a>
+  <a data-nav="orders" href="#/orders" data-t>Orders</a>
+  <a data-nav="prices" href="#/prices" data-t>Prices</a>
+  <a data-nav="suppliers" href="#/suppliers" data-t>Suppliers</a>
+  <a data-nav="log" href="#/log" data-t>Log</a>
+  <a data-nav="account" href="#/account" data-t>Account</a>
 </nav>
 
 <div id="notice" class="notice" role="status" tabindex="-1" hidden></div>
@@ -43,435 +50,449 @@
 <main id="main" class="main office-main">
 
 <section id="screen-loading" data-screen="loading" aria-labelledby="loading-title">
-  <h1 id="loading-title" class="visually-hidden" tabindex="-1">Office</h1>
+  <h1 id="loading-title" class="visually-hidden" tabindex="-1" data-t>Office</h1>
   <div class="spinner" aria-hidden="true"></div>
-  <p class="muted center">Opening the office screens…</p>
+  <p class="muted center" data-t>Opening the office screens…</p>
 </section>
 
 <section id="screen-offline" data-screen="offline" aria-labelledby="offline-title" hidden>
-  <h1 id="offline-title" tabindex="-1">Can't open the office screens</h1>
+  <h1 id="offline-title" tabindex="-1" data-t>Can't open the office screens</h1>
   <p id="offline-text" class="error"></p>
-  <button id="offline-retry" type="button" class="button primary">Try again</button>
+  <button id="offline-retry" type="button" class="button primary" data-t>Try again</button>
 </section>
 
 <!-- ---------- logging in ---------- -->
 
 <section id="screen-login" data-screen="login" aria-labelledby="login-title" hidden>
-  <h1 id="login-title" tabindex="-1">Office log in</h1>
+  <h1 id="login-title" tabindex="-1" data-t>Office log in</h1>
   <form id="login-form" class="narrow" method="post" action="/admin" novalidate>
     <div class="field">
-      <label for="login-phone">Phone number</label>
+      <label for="login-phone" data-t>Phone number</label>
       <input id="login-phone" name="phone" type="tel" inputmode="tel" autocomplete="username"
              maxlength="40">
     </div>
     <div class="field">
-      <label for="login-password">Password</label>
+      <label for="login-password" data-t>Password</label>
       <input id="login-password" name="password" type="password"
              autocomplete="current-password" maxlength="128">
     </div>
     <p id="login-error" class="error" tabindex="-1" hidden></p>
-    <button id="login-submit" type="submit" class="button primary">Log in</button>
+    <button id="login-submit" type="submit" class="button primary" data-t>Log in</button>
   </form>
-  <p class="aside"><a id="login-to-setup" href="#/setup">Have a setup code? Choose your password</a></p>
-  <p class="aside"><a href="/">Workers' wallet</a></p>
+  <p class="aside"><a id="login-to-setup" href="#/setup" data-t>Have a setup code? Choose your password</a></p>
+  <p class="aside"><a href="/" data-t>Workers' wallet</a></p>
 </section>
 
 <section id="screen-setup" data-screen="setup" aria-labelledby="setup-title" hidden>
-  <h1 id="setup-title" tabindex="-1">Choose your password</h1>
+  <h1 id="setup-title" tabindex="-1" data-t>Choose your password</h1>
   <form id="setup-form" class="narrow" method="post" action="/admin" novalidate>
     <div class="field">
-      <label for="setup-phone">Phone number</label>
+      <label for="setup-phone" data-t>Phone number</label>
       <input id="setup-phone" name="phone" type="tel" inputmode="tel" autocomplete="username"
              maxlength="40">
     </div>
     <div class="field">
-      <label for="setup-code">Setup code</label>
+      <label for="setup-code" data-t>Setup code</label>
       <input id="setup-code" name="code" type="text" autocomplete="one-time-code"
              autocapitalize="characters" spellcheck="false" maxlength="40">
     </div>
     <div class="field">
-      <label for="setup-password">New password</label>
+      <label for="setup-password" data-t>New password</label>
       <input id="setup-password" name="password" type="password" autocomplete="new-password"
              maxlength="128" aria-describedby="setup-password-hint">
-      <p id="setup-password-hint" class="hint">At least 10 characters. Don't use your phone number.</p>
+      <p id="setup-password-hint" class="hint" data-t>At least 10 characters. Don't use your phone number.</p>
     </div>
     <div class="field">
-      <label for="setup-password2">New password again</label>
+      <label for="setup-password2" data-t>New password again</label>
       <input id="setup-password2" name="password2" type="password" autocomplete="new-password"
              maxlength="128">
     </div>
     <p id="setup-error" class="error" tabindex="-1" hidden></p>
-    <button id="setup-submit" type="submit" class="button primary">Set my password</button>
+    <button id="setup-submit" type="submit" class="button primary" data-t>Set my password</button>
   </form>
-  <p class="aside"><a href="#/login">I have a password: log in</a></p>
+  <p class="aside"><a href="#/login" data-t>I have a password: log in</a></p>
 </section>
 
 <!-- ---------- overview ---------- -->
 
 <section id="screen-overview" data-screen="overview" aria-labelledby="overview-title" hidden>
   <div class="heading-row">
-    <h1 id="overview-title" tabindex="-1">Overview</h1>
-    <button id="overview-refresh" type="button" class="button small secondary">Refresh</button>
+    <h1 id="overview-title" tabindex="-1" data-t>Overview</h1>
+    <button id="overview-refresh" type="button" class="button small secondary" data-t>Refresh</button>
   </div>
   <p id="overview-error" class="error" tabindex="-1" hidden></p>
   <p id="overview-checks" class="check-line"></p>
   <ul id="overview-problems" class="plain-list error-list" hidden></ul>
   <div class="tiles">
     <div class="card tile">
-      <p class="label">Owed to workers</p>
+      <p class="label" data-t>Owed to workers</p>
       <p id="overview-owed" class="tile-value num"></p>
     </div>
     <div class="card tile">
-      <p class="label">Margin earned</p>
+      <p class="label" data-t>Margin earned</p>
       <p id="overview-margin" class="tile-value num"></p>
     </div>
     <div class="card tile">
-      <p class="label">Withdrawal fees earned</p>
+      <p class="label" data-t>Withdrawal fees earned</p>
       <p id="overview-fees" class="tile-value num"></p>
     </div>
   </div>
 
-  <h2>Bank and tills</h2>
-  <p class="muted small">What the books say is in each. Count the cash and compare.</p>
+  <h2 data-t>Bank and tills</h2>
+  <p class="muted small" data-t>What the books say is in each. Count the cash and compare.</p>
   <table class="table">
-    <thead><tr><th scope="col">Account</th><th scope="col" class="end">Amount</th></tr></thead>
+    <thead><tr><th scope="col" data-t>Account</th><th scope="col" class="end" data-t>Amount</th></tr></thead>
     <tbody id="overview-holdings"></tbody>
   </table>
   <form id="till-form" class="inline-form" method="post" action="/admin" novalidate>
     <div class="field">
-      <label for="till-name">New till</label>
+      <label for="till-name" data-t>New till</label>
       <input id="till-name" name="name" type="text" autocomplete="off" maxlength="30"
              autocapitalize="characters" aria-describedby="till-hint">
-      <p id="till-hint" class="hint">Letters, digits and _, like MAIN or SHOP_2. It becomes TILL_MAIN.</p>
+      <p id="till-hint" class="hint" data-t>Letters, digits and _, like MAIN or SHOP_2. It becomes TILL_MAIN.</p>
     </div>
-    <button id="till-submit" type="submit" class="button small primary">Add till</button>
+    <button id="till-submit" type="submit" class="button small primary" data-t>Add till</button>
   </form>
   <p id="till-error" class="error" tabindex="-1" hidden></p>
   <p id="till-done" class="success" role="status" hidden></p>
 
-  <h2>Backups and hourly checks</h2>
+  <h2 data-t>Backups and hourly checks</h2>
   <p id="overview-maintenance" class="muted"></p>
 
-  <h2>Margin report</h2>
+  <h2 data-t>Margin report</h2>
   <form id="margin-form" class="inline-form" method="post" action="/admin" novalidate>
     <div class="field">
-      <label for="margin-since">From</label>
+      <label for="margin-since" data-t>From</label>
       <input id="margin-since" name="since" type="date">
     </div>
     <div class="field">
-      <label for="margin-until">Up to (not including)</label>
+      <label for="margin-until" data-t>Up to (not including)</label>
       <input id="margin-until" name="until" type="date">
     </div>
-    <button id="margin-submit" type="submit" class="button small primary">Show</button>
+    <button id="margin-submit" type="submit" class="button small primary" data-t>Show</button>
   </form>
   <p id="margin-error" class="error" tabindex="-1" hidden></p>
   <div class="table-wrap">
     <table id="margin-table" class="table" hidden>
       <thead><tr>
-        <th scope="col">Currency</th><th scope="col">Supplier</th>
-        <th scope="col" class="end">Orders</th><th scope="col" class="end">Amount</th>
-        <th scope="col" class="end">Charged</th><th scope="col" class="end">Supplier cost</th>
-        <th scope="col" class="end">Margin</th>
+        <th scope="col" data-t>Currency</th><th scope="col" data-t>Supplier</th>
+        <th scope="col" class="end" data-t>Orders</th><th scope="col" class="end" data-t>Amount</th>
+        <th scope="col" class="end" data-t>Charged</th><th scope="col" class="end" data-t>Supplier cost</th>
+        <th scope="col" class="end" data-t>Margin</th>
       </tr></thead>
       <tbody id="margin-rows"></tbody>
     </table>
   </div>
-  <p id="margin-empty" class="empty" hidden>No paid orders in that time.</p>
+  <p id="margin-empty" class="empty" hidden data-t>No paid orders in that time.</p>
 </section>
 
 <!-- ---------- workers ---------- -->
 
 <section id="screen-workers" data-screen="workers" aria-labelledby="workers-title" hidden>
   <div class="heading-row">
-    <h1 id="workers-title" tabindex="-1">Workers</h1>
-    <button id="workers-add-open" type="button" class="button small primary">Add a worker</button>
+    <h1 id="workers-title" tabindex="-1" data-t>Workers</h1>
+    <button id="workers-add-open" type="button" class="button small primary" data-t>Add a worker</button>
   </div>
 
   <div id="worker-add" class="card" hidden>
-    <h2 id="worker-add-title" tabindex="-1">New account</h2>
+    <h2 id="worker-add-title" tabindex="-1" data-t>New account</h2>
     <form id="worker-add-form" method="post" action="/admin" novalidate>
       <div class="field">
-        <label for="worker-add-name">Name</label>
+        <label for="worker-add-name" data-t>Name</label>
         <input id="worker-add-name" name="name" type="text" autocomplete="off" maxlength="100">
       </div>
       <div class="field">
-        <label for="worker-add-phone">Phone number</label>
+        <label for="worker-add-phone" data-t>Phone number</label>
         <input id="worker-add-phone" name="phone" type="tel" inputmode="tel" autocomplete="off"
                maxlength="40" aria-describedby="worker-add-phone-hint">
-        <p id="worker-add-phone-hint" class="hint">Libyan mobile, like 091 234 5678. They log in with it.</p>
+        <p id="worker-add-phone-hint" class="hint" data-t>Libyan mobile, like 091 234 5678. They log in with it.</p>
       </div>
       <div class="field">
-        <label for="worker-add-whatsapp">WhatsApp (optional)</label>
+        <label for="worker-add-whatsapp" data-t>WhatsApp (optional)</label>
         <input id="worker-add-whatsapp" name="whatsapp" type="tel" inputmode="tel"
                autocomplete="off" maxlength="40" aria-describedby="worker-add-whatsapp-hint">
-        <p id="worker-add-whatsapp-hint" class="hint">With the country code if it isn't Libyan, like +20 100 123 4567.</p>
+        <p id="worker-add-whatsapp-hint" class="hint" data-t>With the country code if it isn't Libyan, like +20 100 123 4567.</p>
       </div>
       <div class="field">
-        <label for="worker-add-role">Account for</label>
+        <label for="worker-add-role" data-t>Account for</label>
         <select id="worker-add-role" name="role">
-          <option value="customer">A worker</option>
-          <option value="admin">Office staff (admin)</option>
+          <option value="customer" data-t>A worker</option>
+          <option value="admin" data-t>Office staff (admin)</option>
         </select>
       </div>
       <div class="field">
-        <label for="worker-add-language">Language</label>
+        <label for="worker-add-language" data-t>Language</label>
         <select id="worker-add-language" name="language">
-          <option value="en">English</option>
-          <option value="ar">Arabic</option>
-          <option value="fr">French</option>
+          <option value="en" lang="en">English</option>
+          <option value="ar" lang="ar">العربية</option>
+          <option value="fr" lang="fr">Français</option>
         </select>
       </div>
       <p id="worker-add-error" class="error" tabindex="-1" hidden></p>
       <div class="actions row">
-        <button id="worker-add-submit" type="submit" class="button primary">Create account</button>
-        <button id="worker-add-close" type="button" class="button secondary">Close</button>
+        <button id="worker-add-submit" type="submit" class="button primary" data-t>Create account</button>
+        <button id="worker-add-close" type="button" class="button secondary" data-t>Close</button>
       </div>
     </form>
   </div>
 
   <div id="code-box" class="card code-box" hidden>
     <h2 id="code-title" class="success-title" tabindex="-1"></h2>
-    <p class="label">Setup code</p>
+    <p class="label" data-t>Setup code</p>
     <p id="code-value" class="receipt-code num"></p>
     <p id="code-text"></p>
-    <button id="code-done" type="button" class="button small secondary">Done</button>
+    <button id="code-done" type="button" class="button small secondary" data-t>Done</button>
   </div>
 
   <div class="field search">
-    <label for="workers-search">Find by name or phone</label>
+    <label for="workers-search" data-t>Find by name or phone</label>
     <input id="workers-search" name="search" type="search" autocomplete="off" maxlength="100">
   </div>
   <p id="workers-error" class="error" tabindex="-1" hidden></p>
   <div class="table-wrap">
     <table class="table">
       <thead><tr>
-        <th scope="col">Name</th><th scope="col">Phone</th>
-        <th scope="col" class="end">Balance</th><th scope="col">Status</th>
+        <th scope="col" data-t>Name</th><th scope="col" data-t>Phone</th>
+        <th scope="col" class="end" data-t>Balance</th><th scope="col" data-t>Status</th>
       </tr></thead>
       <tbody id="workers-rows"></tbody>
     </table>
   </div>
-  <p id="workers-empty" class="empty" hidden>Nobody found.</p>
+  <p id="workers-empty" class="empty" hidden data-t>Nobody found.</p>
 </section>
 
 <section id="screen-worker" data-screen="worker" aria-labelledby="worker-name" hidden>
-  <p class="back"><a href="#/workers">← All workers</a></p>
+  <p class="back"><a href="#/workers" data-t>← All workers</a></p>
   <h1 id="worker-name" tabindex="-1" dir="auto"></h1>
   <p id="worker-error" class="error" tabindex="-1" hidden></p>
   <dl class="card facts">
-    <div><dt>Phone</dt><dd id="worker-phone" class="num"></dd></div>
-    <div><dt>WhatsApp</dt><dd id="worker-whatsapp" class="num"></dd></div>
-    <div><dt>Status</dt><dd id="worker-status"></dd></div>
-    <div><dt>Balance</dt><dd id="worker-balance" class="num strong"></dd></div>
+    <div><dt data-t>Phone</dt><dd id="worker-phone" class="num"></dd></div>
+    <div><dt data-t>WhatsApp</dt><dd id="worker-whatsapp" class="num"></dd></div>
+    <div><dt data-t>Status</dt><dd id="worker-status"></dd></div>
+    <div><dt data-t>Language</dt><dd id="worker-language"></dd></div>
+    <div><dt data-t>Balance</dt><dd id="worker-balance" class="num strong"></dd></div>
   </dl>
 
   <div id="worker-code-box" class="card code-box" hidden>
-    <h2 id="worker-code-title" class="success-title" tabindex="-1">New setup code</h2>
+    <h2 id="worker-code-title" class="success-title" tabindex="-1" data-t>New setup code</h2>
     <p id="worker-code-value" class="receipt-code num"></p>
     <p id="worker-code-text"></p>
-    <button id="worker-code-done" type="button" class="button small secondary">Done</button>
+    <button id="worker-code-done" type="button" class="button small secondary" data-t>Done</button>
   </div>
 
   <div id="worker-money" class="split">
     <form id="deposit-form" class="card" method="post" action="/admin" novalidate>
-      <h2>Deposit</h2>
-      <p class="muted small">LYD the worker gave the office, added to their balance.</p>
+      <h2 data-t>Deposit</h2>
+      <p class="muted small" data-t>LYD the worker gave the office, added to their balance.</p>
       <div class="field">
-        <label for="deposit-amount">Amount (LYD)</label>
+        <label for="deposit-amount" data-t>Amount (LYD)</label>
         <input id="deposit-amount" name="amount" type="text" inputmode="decimal"
                autocomplete="off" maxlength="20">
       </div>
       <div class="field">
-        <label for="deposit-into">Received into</label>
+        <label for="deposit-into" data-t>Received into</label>
         <select id="deposit-into" name="into"></select>
       </div>
       <div class="field">
-        <label for="deposit-note">Note (optional)</label>
+        <label for="deposit-note" data-t>Note (optional)</label>
         <input id="deposit-note" name="note" type="text" autocomplete="off" maxlength="200">
       </div>
       <p id="deposit-error" class="error" tabindex="-1" hidden></p>
-      <button id="deposit-submit" type="submit" class="button primary">Next</button>
+      <button id="deposit-submit" type="submit" class="button primary" data-t>Next</button>
     </form>
 
     <form id="withdraw-form" class="card" method="post" action="/admin" novalidate>
-      <h2>Cash withdrawal</h2>
-      <p class="muted small">Taken from their balance; they get the amount less the fee in cash.</p>
+      <h2 data-t>Cash withdrawal</h2>
+      <p class="muted small" data-t>Taken from their balance; they get the amount less the fee in cash.</p>
       <div class="field">
-        <label for="withdraw-amount">Amount (LYD)</label>
+        <label for="withdraw-amount" data-t>Amount (LYD)</label>
         <input id="withdraw-amount" name="amount" type="text" inputmode="decimal"
                autocomplete="off" maxlength="20">
       </div>
       <div class="field">
-        <label for="withdraw-fee">Fee (LYD)</label>
+        <label for="withdraw-fee" data-t>Fee (LYD)</label>
         <input id="withdraw-fee" name="fee" type="text" inputmode="decimal" autocomplete="off"
                maxlength="20" aria-describedby="withdraw-fee-hint">
-        <p id="withdraw-fee-hint" class="hint">Empty means no fee.</p>
+        <p id="withdraw-fee-hint" class="hint" data-t>Empty means no fee.</p>
       </div>
       <div class="field">
-        <label for="withdraw-till">From till</label>
+        <label for="withdraw-till" data-t>From till</label>
         <select id="withdraw-till" name="from_till"></select>
       </div>
       <div class="field">
-        <label for="withdraw-note">Note (optional)</label>
+        <label for="withdraw-note" data-t>Note (optional)</label>
         <input id="withdraw-note" name="note" type="text" autocomplete="off" maxlength="200">
       </div>
       <p id="withdraw-error" class="error" tabindex="-1" hidden></p>
-      <button id="withdraw-submit" type="submit" class="button primary">Next</button>
+      <button id="withdraw-submit" type="submit" class="button primary" data-t>Next</button>
     </form>
   </div>
 
-  <h2>Account</h2>
+  <h2 data-t>Account</h2>
   <div id="worker-actions" class="button-row"></div>
   <form id="whatsapp-form" class="inline-form" method="post" action="/admin" novalidate>
     <div class="field">
-      <label for="whatsapp-number">WhatsApp number</label>
+      <label for="whatsapp-number" data-t>WhatsApp number</label>
       <input id="whatsapp-number" name="whatsapp" type="tel" inputmode="tel" autocomplete="off"
              maxlength="40" aria-describedby="whatsapp-hint">
-      <p id="whatsapp-hint" class="hint">Empty removes it.</p>
+      <p id="whatsapp-hint" class="hint" data-t>Empty removes it.</p>
     </div>
-    <button id="whatsapp-submit" type="submit" class="button small secondary">Save WhatsApp</button>
+    <button id="whatsapp-submit" type="submit" class="button small secondary" data-t>Save WhatsApp</button>
   </form>
   <p id="whatsapp-error" class="error" tabindex="-1" hidden></p>
   <p id="whatsapp-done" class="success" role="status" hidden></p>
+  <form id="language-form" class="inline-form" method="post" action="/admin" novalidate>
+    <div class="field">
+      <label for="language-choice" data-t>Language of their screens</label>
+      <select id="language-choice" name="language">
+        <option value="en" lang="en">English</option>
+        <option value="ar" lang="ar">العربية</option>
+        <option value="fr" lang="fr">Français</option>
+      </select>
+    </div>
+    <button id="language-submit" type="submit" class="button small secondary" data-t>Save language</button>
+  </form>
+  <p id="language-error" class="error" tabindex="-1" hidden></p>
+  <p id="language-done" class="success" role="status" hidden></p>
 
   <div class="heading-row">
-    <h2 id="worker-statement-title">Activity</h2>
-    <button id="worker-refresh" type="button" class="button small secondary">Refresh</button>
+    <h2 id="worker-statement-title" data-t>Activity</h2>
+    <button id="worker-refresh" type="button" class="button small secondary" data-t>Refresh</button>
   </div>
   <div class="table-wrap">
     <table class="table">
       <thead><tr>
-        <th scope="col">When</th><th scope="col">What</th>
-        <th scope="col" class="end">Amount</th><th scope="col" class="end">Balance after</th>
-        <th scope="col"><span class="visually-hidden">Actions</span></th>
+        <th scope="col" data-t>When</th><th scope="col" data-t>What</th>
+        <th scope="col" class="end" data-t>Amount</th><th scope="col" class="end" data-t>Balance after</th>
+        <th scope="col"><span class="visually-hidden" data-t>Actions</span></th>
       </tr></thead>
       <tbody id="worker-rows"></tbody>
     </table>
   </div>
-  <p id="worker-empty" class="empty" hidden>No activity yet.</p>
-  <button id="worker-more" type="button" class="button secondary" hidden>Show more</button>
+  <p id="worker-empty" class="empty" hidden data-t>No activity yet.</p>
+  <button id="worker-more" type="button" class="button secondary" hidden data-t>Show more</button>
 </section>
 
 <!-- ---------- money ---------- -->
 
 <section id="screen-money" data-screen="money" aria-labelledby="money-title" hidden>
   <div class="heading-row">
-    <h1 id="money-title" tabindex="-1">Money</h1>
-    <button id="money-refresh" type="button" class="button small secondary">Refresh</button>
+    <h1 id="money-title" tabindex="-1" data-t>Money</h1>
+    <button id="money-refresh" type="button" class="button small secondary" data-t>Refresh</button>
   </div>
   <p id="money-error" class="error" tabindex="-1" hidden></p>
 
-  <h2 id="payroll-title">Salaries</h2>
-  <p class="muted small">The company sent one payment for everyone: type each worker's
+  <h2 id="payroll-title" data-t>Salaries</h2>
+  <p class="muted small" data-t>The company sent one payment for everyone: type each worker's
     salary (leave the others empty). It's posted once per payment reference.</p>
   <form id="payroll-form" method="post" action="/admin" novalidate>
     <div class="inline-form">
       <div class="field">
-        <label for="payroll-ref">Payment reference</label>
+        <label for="payroll-ref" data-t>Payment reference</label>
         <input id="payroll-ref" name="batch_ref" type="text" autocomplete="off" maxlength="100"
                aria-describedby="payroll-ref-hint">
-        <p id="payroll-ref-hint" class="hint">Like the bank transfer's number, or NOV-2026.</p>
+        <p id="payroll-ref-hint" class="hint" data-t>Like the bank transfer's number, or NOV-2026.</p>
       </div>
       <div class="field">
-        <label for="payroll-into">Received into</label>
+        <label for="payroll-into" data-t>Received into</label>
         <select id="payroll-into" name="into"></select>
       </div>
       <div class="field">
-        <label for="payroll-note">Note (optional)</label>
+        <label for="payroll-note" data-t>Note (optional)</label>
         <input id="payroll-note" name="note" type="text" autocomplete="off" maxlength="200">
       </div>
     </div>
     <div class="field search">
-      <label for="payroll-search">Find by name or phone</label>
+      <label for="payroll-search" data-t>Find by name or phone</label>
       <input id="payroll-search" name="search" type="search" autocomplete="off" maxlength="100">
     </div>
     <div class="table-wrap">
       <table class="table">
         <thead><tr>
-          <th scope="col">Worker</th><th scope="col">Phone</th>
-          <th scope="col" class="end">Salary (LYD)</th>
+          <th scope="col" data-t>Worker</th><th scope="col" data-t>Phone</th>
+          <th scope="col" class="end" data-t>Salary (LYD)</th>
         </tr></thead>
         <tbody id="payroll-rows"></tbody>
       </table>
     </div>
-    <p id="payroll-empty" class="empty" hidden>No workers who can be paid.</p>
+    <p id="payroll-empty" class="empty" hidden data-t>No workers who can be paid.</p>
     <p id="payroll-total" class="strong"></p>
     <p id="payroll-error" class="error" tabindex="-1" hidden></p>
-    <button id="payroll-submit" type="submit" class="button primary narrow">Next</button>
+    <button id="payroll-submit" type="submit" class="button primary narrow" data-t>Next</button>
   </form>
 
   <div class="split">
     <form id="move-form" class="card" method="post" action="/admin" novalidate>
-      <h2>Move money</h2>
-      <p class="muted small">Cash taken from the bank to a till, a till's cash put in the
+      <h2 data-t>Move money</h2>
+      <p class="muted small" data-t>Cash taken from the bank to a till, a till's cash put in the
         bank, or from one till to another.</p>
       <div class="field">
-        <label for="move-from">From</label>
+        <label for="move-from" data-t>From</label>
         <select id="move-from" name="from"></select>
       </div>
       <div class="field">
-        <label for="move-to">To</label>
+        <label for="move-to" data-t>To</label>
         <select id="move-to" name="to"></select>
       </div>
       <div class="field">
-        <label for="move-amount">Amount (LYD)</label>
+        <label for="move-amount" data-t>Amount (LYD)</label>
         <input id="move-amount" name="amount" type="text" inputmode="decimal"
                autocomplete="off" maxlength="20">
       </div>
       <div class="field">
-        <label for="move-note">Note (optional)</label>
+        <label for="move-note" data-t>Note (optional)</label>
         <input id="move-note" name="note" type="text" autocomplete="off" maxlength="200">
       </div>
       <p id="move-error" class="error" tabindex="-1" hidden></p>
-      <button id="move-submit" type="submit" class="button primary">Next</button>
+      <button id="move-submit" type="submit" class="button primary" data-t>Next</button>
     </form>
 
     <form id="capital-form" class="card" method="post" action="/admin" novalidate>
-      <h2>Owner's money</h2>
-      <p class="muted small">The owner's own money put into the bank or a till (to pay
+      <h2 data-t>Owner's money</h2>
+      <p class="muted small" data-t>The owner's own money put into the bank or a till (to pay
         out from), or taken out.</p>
       <div class="field">
-        <label for="capital-direction">What</label>
+        <label for="capital-direction" data-t>What</label>
         <select id="capital-direction" name="direction">
-          <option value="in">Put in</option>
-          <option value="out">Take out</option>
+          <option value="in" data-t>Put in</option>
+          <option value="out" data-t>Take out</option>
         </select>
       </div>
       <div class="field">
-        <label for="capital-code">Bank or till</label>
+        <label for="capital-code" data-t>Bank or till</label>
         <select id="capital-code" name="code"></select>
       </div>
       <div class="field">
-        <label for="capital-amount">Amount (LYD)</label>
+        <label for="capital-amount" data-t>Amount (LYD)</label>
         <input id="capital-amount" name="amount" type="text" inputmode="decimal"
                autocomplete="off" maxlength="20">
       </div>
       <div class="field">
-        <label for="capital-note">Note (optional)</label>
+        <label for="capital-note" data-t>Note (optional)</label>
         <input id="capital-note" name="note" type="text" autocomplete="off" maxlength="200">
       </div>
       <p id="capital-error" class="error" tabindex="-1" hidden></p>
-      <button id="capital-submit" type="submit" class="button primary">Next</button>
+      <button id="capital-submit" type="submit" class="button primary" data-t>Next</button>
     </form>
   </div>
 
-  <h2 id="count-title">Count the cash</h2>
-  <p class="muted small">Type what is really there: the bank statement's balance, and the
+  <h2 id="count-title" data-t>Count the cash</h2>
+  <p class="muted small" data-t>Type what is really there: the bank statement's balance, and the
     cash counted in each till. Nothing is changed; it shows any difference with the books.</p>
   <form id="count-form" method="post" action="/admin" novalidate>
     <div class="table-wrap">
       <table class="table">
         <thead><tr>
-          <th scope="col">Account</th><th scope="col" class="end">The books say</th>
-          <th scope="col" class="end">Really there (LYD)</th>
-          <th scope="col" class="end">Difference</th>
+          <th scope="col" data-t>Account</th><th scope="col" class="end" data-t>The books say</th>
+          <th scope="col" class="end" data-t>Really there (LYD)</th>
+          <th scope="col" class="end" data-t>Difference</th>
         </tr></thead>
         <tbody id="count-rows"></tbody>
       </table>
     </div>
     <p id="count-result" class="check-line" role="status" hidden></p>
     <p id="count-error" class="error" tabindex="-1" hidden></p>
-    <button id="count-submit" type="submit" class="button primary narrow">Compare</button>
+    <button id="count-submit" type="submit" class="button primary narrow" data-t>Compare</button>
   </form>
 </section>
 
@@ -479,94 +500,94 @@
 
 <section id="screen-orders" data-screen="orders" aria-labelledby="orders-title" hidden>
   <div class="heading-row">
-    <h1 id="orders-title" tabindex="-1">Currency orders</h1>
-    <button id="orders-refresh" type="button" class="button small secondary">Refresh</button>
+    <h1 id="orders-title" tabindex="-1" data-t>Currency orders</h1>
+    <button id="orders-refresh" type="button" class="button small secondary" data-t>Refresh</button>
   </div>
   <div class="field narrow">
-    <label for="orders-status">Show</label>
+    <label for="orders-status" data-t>Show</label>
     <select id="orders-status" name="status">
-      <option value="placed">New (no supplier yet)</option>
-      <option value="assigned">With a supplier</option>
-      <option value="paid">Paid out</option>
-      <option value="cancelled">Cancelled</option>
-      <option value="">All</option>
+      <option value="placed" data-t>New (no supplier yet)</option>
+      <option value="assigned" data-t>With a supplier</option>
+      <option value="paid" data-t>Paid out</option>
+      <option value="cancelled" data-t>Cancelled</option>
+      <option value="" data-t>All</option>
     </select>
   </div>
   <form id="paid-form" class="inline-form" method="post" action="/admin" novalidate>
     <div class="field">
-      <label for="paid-code">Receipt code</label>
+      <label for="paid-code" data-t>Receipt code</label>
       <input id="paid-code" name="receipt_code" type="text" autocomplete="off"
              autocapitalize="characters" spellcheck="false" maxlength="40">
     </div>
     <div class="field">
-      <label for="paid-ref">Supplier's payout reference</label>
+      <label for="paid-ref" data-t>Supplier's payout reference</label>
       <input id="paid-ref" name="payout_ref" type="text" autocomplete="off" maxlength="100">
     </div>
-    <button id="paid-submit" type="submit" class="button small primary">Mark paid</button>
+    <button id="paid-submit" type="submit" class="button small primary" data-t>Mark paid</button>
   </form>
-  <p class="hint">For an order with a supplier already. The supplier confirmed it was paid out.</p>
+  <p class="hint" data-t>For an order with a supplier already. The supplier confirmed it was paid out.</p>
   <p id="paid-error" class="error" tabindex="-1" hidden></p>
   <p id="paid-done" class="success" role="status" hidden></p>
   <p id="orders-error" class="error" tabindex="-1" hidden></p>
   <ul id="orders-list" class="list order-cards" aria-busy="false"></ul>
-  <p id="orders-empty" class="empty" hidden>No orders.</p>
-  <button id="orders-more" type="button" class="button secondary" hidden>Show more</button>
+  <p id="orders-empty" class="empty" hidden data-t>No orders.</p>
+  <button id="orders-more" type="button" class="button secondary" hidden data-t>Show more</button>
 </section>
 
 <!-- ---------- prices ---------- -->
 
 <section id="screen-prices" data-screen="prices" aria-labelledby="prices-title" hidden>
   <div class="heading-row">
-    <h1 id="prices-title" tabindex="-1">Currencies and prices</h1>
-    <button id="prices-refresh" type="button" class="button small secondary">Refresh</button>
+    <h1 id="prices-title" tabindex="-1" data-t>Currencies and prices</h1>
+    <button id="prices-refresh" type="button" class="button small secondary" data-t>Refresh</button>
   </div>
-  <p class="muted small">The price is LYD for 1 unit: what workers pay. A quote keeps its price for a few minutes.</p>
+  <p class="muted small" data-t>The price is LYD for 1 unit: what workers pay. A quote keeps its price for a few minutes.</p>
   <p id="prices-error" class="error" tabindex="-1" hidden></p>
   <div class="table-wrap">
     <table class="table">
       <thead><tr>
-        <th scope="col">Currency</th><th scope="col">Workers see it</th>
-        <th scope="col" class="end">Price (LYD)</th><th scope="col">Set</th>
-        <th scope="col"><span class="visually-hidden">Actions</span></th>
+        <th scope="col" data-t>Currency</th><th scope="col" data-t>Workers see it</th>
+        <th scope="col" class="end" data-t>Price (LYD)</th><th scope="col" data-t>Set</th>
+        <th scope="col"><span class="visually-hidden" data-t>Actions</span></th>
       </tr></thead>
       <tbody id="prices-rows"></tbody>
     </table>
   </div>
-  <p id="prices-empty" class="empty" hidden>No currencies yet. Add one below.</p>
+  <p id="prices-empty" class="empty" hidden data-t>No currencies yet. Add one below.</p>
 
   <div class="split">
     <form id="price-form" class="card" method="post" action="/admin" novalidate>
-      <h2>Set a price</h2>
+      <h2 data-t>Set a price</h2>
       <div class="field">
-        <label for="price-currency">Currency</label>
+        <label for="price-currency" data-t>Currency</label>
         <select id="price-currency" name="currency"></select>
       </div>
       <div class="field">
-        <label for="price-rate">LYD for 1 unit</label>
+        <label for="price-rate" data-t>LYD for 1 unit</label>
         <input id="price-rate" name="rate" type="text" inputmode="decimal" autocomplete="off"
                maxlength="20" aria-describedby="price-rate-hint">
-        <p id="price-rate-hint" class="hint">Like 7.85 (up to 6 decimals).</p>
+        <p id="price-rate-hint" class="hint" data-t>Like 7.85 (up to 6 decimals).</p>
       </div>
       <div class="field check">
         <input id="price-void" name="void_quotes" type="checkbox">
-        <label for="price-void">The old price was wrong: quotes already given can't be used</label>
+        <label for="price-void" data-t>The old price was wrong: quotes already given can't be used</label>
       </div>
       <p id="price-error" class="error" tabindex="-1" hidden></p>
       <p id="price-done" class="success" role="status" hidden></p>
-      <button id="price-submit" type="submit" class="button primary">Set price</button>
+      <button id="price-submit" type="submit" class="button primary" data-t>Set price</button>
     </form>
 
     <form id="currency-form" class="card" method="post" action="/admin" novalidate>
-      <h2>Add a currency</h2>
+      <h2 data-t>Add a currency</h2>
       <div class="field">
-        <label for="currency-code">Code</label>
+        <label for="currency-code" data-t>Code</label>
         <input id="currency-code" name="code" type="text" autocomplete="off" maxlength="3"
                autocapitalize="characters" spellcheck="false" aria-describedby="currency-code-hint">
-        <p id="currency-code-hint" class="hint">3 letters, like USD or EGP. Then set its price.</p>
+        <p id="currency-code-hint" class="hint" data-t>3 letters, like USD or EGP. Then set its price.</p>
       </div>
       <p id="currency-error" class="error" tabindex="-1" hidden></p>
       <p id="currency-done" class="success" role="status" hidden></p>
-      <button id="currency-submit" type="submit" class="button primary">Add currency</button>
+      <button id="currency-submit" type="submit" class="button primary" data-t>Add currency</button>
     </form>
   </div>
 </section>
@@ -575,179 +596,192 @@
 
 <section id="screen-suppliers" data-screen="suppliers" aria-labelledby="suppliers-title" hidden>
   <div class="heading-row">
-    <h1 id="suppliers-title" tabindex="-1">Suppliers</h1>
-    <button id="suppliers-refresh" type="button" class="button small secondary">Refresh</button>
+    <h1 id="suppliers-title" tabindex="-1" data-t>Suppliers</h1>
+    <button id="suppliers-refresh" type="button" class="button small secondary" data-t>Refresh</button>
   </div>
   <p id="suppliers-error" class="error" tabindex="-1" hidden></p>
   <div class="table-wrap">
     <table class="table">
       <thead><tr>
-        <th scope="col">Name</th><th scope="col">Country</th><th scope="col">Status</th>
-        <th scope="col">Rates (LYD for 1)</th><th scope="col" class="end">We owe them</th>
+        <th scope="col" data-t>Name</th><th scope="col" data-t>Country</th><th scope="col" data-t>Status</th>
+        <th scope="col" data-t>Rates (LYD for 1)</th><th scope="col" class="end" data-t>We owe them</th>
       </tr></thead>
       <tbody id="suppliers-rows"></tbody>
     </table>
   </div>
-  <p id="suppliers-empty" class="empty" hidden>No suppliers yet.</p>
+  <p id="suppliers-empty" class="empty" hidden data-t>No suppliers yet.</p>
 
   <form id="supplier-add-form" class="card narrow" method="post" action="/admin" novalidate>
-    <h2>Add a supplier</h2>
+    <h2 data-t>Add a supplier</h2>
     <div class="field">
-      <label for="supplier-add-name">Name</label>
+      <label for="supplier-add-name" data-t>Name</label>
       <input id="supplier-add-name" name="name" type="text" autocomplete="off" maxlength="100">
     </div>
     <div class="field">
-      <label for="supplier-add-country">Country (optional)</label>
+      <label for="supplier-add-country" data-t>Country (optional)</label>
       <input id="supplier-add-country" name="country" type="text" autocomplete="off"
              maxlength="100">
     </div>
     <p id="supplier-add-error" class="error" tabindex="-1" hidden></p>
     <p id="supplier-add-done" class="success" role="status" hidden></p>
-    <button id="supplier-add-submit" type="submit" class="button primary">Add supplier</button>
+    <button id="supplier-add-submit" type="submit" class="button primary" data-t>Add supplier</button>
   </form>
 </section>
 
 <section id="screen-supplier" data-screen="supplier" aria-labelledby="supplier-name" hidden>
-  <p class="back"><a href="#/suppliers">← All suppliers</a></p>
+  <p class="back"><a href="#/suppliers" data-t>← All suppliers</a></p>
   <h1 id="supplier-name" tabindex="-1" dir="auto"></h1>
   <p id="supplier-error" class="error" tabindex="-1" hidden></p>
   <dl class="card facts">
-    <div><dt>Country</dt><dd id="supplier-country" dir="auto"></dd></div>
-    <div><dt>Status</dt><dd id="supplier-status"></dd></div>
-    <div><dt>We owe them</dt><dd id="supplier-balance" class="num strong"></dd></div>
-    <div><dt>Rates</dt><dd id="supplier-rates" class="num"></dd></div>
+    <div><dt data-t>Country</dt><dd id="supplier-country" dir="auto"></dd></div>
+    <div><dt data-t>Status</dt><dd id="supplier-status"></dd></div>
+    <div><dt data-t>We owe them</dt><dd id="supplier-balance" class="num strong"></dd></div>
+    <div><dt data-t>Rates</dt><dd id="supplier-rates" class="num"></dd></div>
   </dl>
   <div id="supplier-actions" class="button-row"></div>
 
   <div class="split">
     <form id="supplier-price-form" class="card" method="post" action="/admin" novalidate>
-      <h2>Their rate</h2>
-      <p class="muted small">LYD they charge for 1 unit. Used for orders given to them from now on.</p>
+      <h2 data-t>Their rate</h2>
+      <p class="muted small" data-t>LYD they charge for 1 unit. Used for orders given to them from now on.</p>
       <div class="field">
-        <label for="supplier-price-currency">Currency</label>
+        <label for="supplier-price-currency" data-t>Currency</label>
         <select id="supplier-price-currency" name="currency"></select>
       </div>
       <div class="field">
-        <label for="supplier-price-rate">LYD for 1 unit</label>
+        <label for="supplier-price-rate" data-t>LYD for 1 unit</label>
         <input id="supplier-price-rate" name="rate" type="text" inputmode="decimal"
                autocomplete="off" maxlength="20">
       </div>
       <p id="supplier-price-error" class="error" tabindex="-1" hidden></p>
       <p id="supplier-price-done" class="success" role="status" hidden></p>
-      <button id="supplier-price-submit" type="submit" class="button primary">Set rate</button>
+      <button id="supplier-price-submit" type="submit" class="button primary" data-t>Set rate</button>
     </form>
 
     <form id="pay-form" class="card" method="post" action="/admin" novalidate>
-      <h2>Pay the supplier</h2>
-      <p class="muted small">LYD paid to them. More than we owe stays with them as a prepayment.</p>
+      <h2 data-t>Pay the supplier</h2>
+      <p class="muted small" data-t>LYD paid to them. More than we owe stays with them as a prepayment.</p>
       <div class="field">
-        <label for="pay-amount">Amount (LYD)</label>
+        <label for="pay-amount" data-t>Amount (LYD)</label>
         <input id="pay-amount" name="amount" type="text" inputmode="decimal" autocomplete="off"
                maxlength="20">
       </div>
       <div class="field">
-        <label for="pay-from">Paid from</label>
+        <label for="pay-from" data-t>Paid from</label>
         <select id="pay-from" name="from"></select>
       </div>
       <div class="field">
-        <label for="pay-reference">Reference</label>
+        <label for="pay-reference" data-t>Reference</label>
         <input id="pay-reference" name="reference" type="text" autocomplete="off"
                maxlength="100" aria-describedby="pay-reference-hint">
-        <p id="pay-reference-hint" class="hint">The bank transfer's number, or the receipt's.</p>
+        <p id="pay-reference-hint" class="hint" data-t>The bank transfer's number, or the receipt's.</p>
       </div>
       <div class="field">
-        <label for="pay-note">Note (optional)</label>
+        <label for="pay-note" data-t>Note (optional)</label>
         <input id="pay-note" name="note" type="text" autocomplete="off" maxlength="200">
       </div>
       <p id="pay-error" class="error" tabindex="-1" hidden></p>
-      <button id="pay-submit" type="submit" class="button primary">Next</button>
+      <button id="pay-submit" type="submit" class="button primary" data-t>Next</button>
     </form>
   </div>
 
-  <h2>Their account</h2>
+  <h2 data-t>Their account</h2>
   <div class="table-wrap">
     <table class="table">
       <thead><tr>
-        <th scope="col">When</th><th scope="col">What</th>
-        <th scope="col" class="end">Amount</th><th scope="col" class="end">Owed after</th>
+        <th scope="col" data-t>When</th><th scope="col" data-t>What</th>
+        <th scope="col" class="end" data-t>Amount</th><th scope="col" class="end" data-t>Owed after</th>
       </tr></thead>
       <tbody id="supplier-rows"></tbody>
     </table>
   </div>
-  <p id="supplier-empty" class="empty" hidden>Nothing yet.</p>
-  <button id="supplier-more" type="button" class="button secondary" hidden>Show more</button>
+  <p id="supplier-empty" class="empty" hidden data-t>Nothing yet.</p>
+  <button id="supplier-more" type="button" class="button secondary" hidden data-t>Show more</button>
 </section>
 
 <!-- ---------- log ---------- -->
 
 <section id="screen-log" data-screen="log" aria-labelledby="log-title" hidden>
   <div class="heading-row">
-    <h1 id="log-title" tabindex="-1">Office log</h1>
-    <button id="log-refresh" type="button" class="button small secondary">Refresh</button>
+    <h1 id="log-title" tabindex="-1" data-t>Office log</h1>
+    <button id="log-refresh" type="button" class="button small secondary" data-t>Refresh</button>
   </div>
-  <p class="muted small">Everything the office did, newest first, with its reasons.</p>
+  <p class="muted small" data-t>Everything the office did, newest first, with its reasons.</p>
   <div class="field narrow">
-    <label for="log-kind">Show</label>
+    <label for="log-kind" data-t>Show</label>
     <select id="log-kind" name="kind">
-      <option value="">Everything</option>
-      <option value="user">Accounts</option>
-      <option value="transaction">Money</option>
-      <option value="order">Orders</option>
-      <option value="supplier">Suppliers</option>
-      <option value="code">Currencies, prices and tills</option>
+      <option value="" data-t>Everything</option>
+      <option value="user" data-t>Accounts</option>
+      <option value="transaction" data-t>Money</option>
+      <option value="order" data-t>Orders</option>
+      <option value="supplier" data-t>Suppliers</option>
+      <option value="code" data-t>Currencies, prices and tills</option>
     </select>
   </div>
   <p id="log-error" class="error" tabindex="-1" hidden></p>
   <div class="table-wrap">
     <table class="table">
       <thead><tr>
-        <th scope="col">When</th><th scope="col">Who</th><th scope="col">What</th>
-        <th scope="col">Details</th>
+        <th scope="col" data-t>When</th><th scope="col" data-t>Who</th><th scope="col" data-t>What</th>
+        <th scope="col" data-t>Details</th>
       </tr></thead>
       <tbody id="log-rows"></tbody>
     </table>
   </div>
-  <p id="log-empty" class="empty" hidden>Nothing yet.</p>
-  <button id="log-more" type="button" class="button secondary" hidden>Show more</button>
+  <p id="log-empty" class="empty" hidden data-t>Nothing yet.</p>
+  <button id="log-more" type="button" class="button secondary" hidden data-t>Show more</button>
 </section>
 
 <!-- ---------- account ---------- -->
 
 <section id="screen-account" data-screen="account" aria-labelledby="account-title" hidden>
-  <h1 id="account-title" tabindex="-1">Your account</h1>
+  <h1 id="account-title" tabindex="-1" data-t>Your account</h1>
   <dl class="card facts narrow">
-    <div><dt>Name</dt><dd id="account-name" class="strong" dir="auto"></dd></div>
-    <div><dt>Phone</dt><dd id="account-phone" class="num"></dd></div>
+    <div><dt data-t>Name</dt><dd id="account-name" class="strong" dir="auto"></dd></div>
+    <div><dt data-t>Phone</dt><dd id="account-phone" class="num"></dd></div>
   </dl>
-  <p class="muted small">You're logged out after 30 minutes without using the screens, and after 8 hours.</p>
+  <p class="muted small" data-t>You're logged out after 30 minutes without using the screens, and after 8 hours.</p>
 
-  <h2>Change your password</h2>
+  <form id="my-language-form" class="inline-form" method="post" action="/admin" novalidate>
+    <div class="field">
+      <label for="my-language" data-t>Language of the office screens</label>
+      <select id="my-language" name="language">
+        <option value="en" lang="en">English</option>
+        <option value="ar" lang="ar">العربية</option>
+        <option value="fr" lang="fr">Français</option>
+      </select>
+    </div>
+    <button id="my-language-submit" type="submit" class="button small secondary" data-t>Save language</button>
+  </form>
+  <p id="my-language-error" class="error" tabindex="-1" hidden></p>
+
+  <h2 data-t>Change your password</h2>
   <form id="password-form" class="narrow" method="post" action="/admin" novalidate>
     <div class="field">
-      <label for="password-old">Current password</label>
+      <label for="password-old" data-t>Current password</label>
       <input id="password-old" name="old_password" type="password"
              autocomplete="current-password" maxlength="128">
     </div>
     <div class="field">
-      <label for="password-new">New password</label>
+      <label for="password-new" data-t>New password</label>
       <input id="password-new" name="new_password" type="password" autocomplete="new-password"
              maxlength="128" aria-describedby="password-new-hint">
-      <p id="password-new-hint" class="hint">At least 10 characters. Don't use your phone number.</p>
+      <p id="password-new-hint" class="hint" data-t>At least 10 characters. Don't use your phone number.</p>
     </div>
     <div class="field">
-      <label for="password-new2">New password again</label>
+      <label for="password-new2" data-t>New password again</label>
       <input id="password-new2" name="new_password2" type="password" autocomplete="new-password"
              maxlength="128">
     </div>
     <p id="password-error" class="error" tabindex="-1" hidden></p>
     <p id="password-done" class="success" role="status" hidden></p>
-    <button id="password-submit" type="submit" class="button primary">Change password</button>
+    <button id="password-submit" type="submit" class="button primary" data-t>Change password</button>
   </form>
 
   <div class="card narrow">
     <p id="account-error" class="error" tabindex="-1" hidden></p>
-    <button id="logout" type="button" class="button secondary">Log out</button>
-    <button id="logout-all" type="button" class="button danger-outline">Log out on every device</button>
+    <button id="logout" type="button" class="button secondary" data-t>Log out</button>
+    <button id="logout-all" type="button" class="button danger-outline" data-t>Log out on every device</button>
   </div>
 </section>
 
@@ -762,29 +796,29 @@
     <dl id="ask-facts" class="facts" hidden></dl>
     <p id="ask-text" hidden></p>
     <div id="ask-reason-field" class="field" hidden>
-      <label for="ask-reason">Reason</label>
+      <label for="ask-reason" data-t>Reason</label>
       <input id="ask-reason" name="reason" type="text" autocomplete="off" maxlength="500"
              aria-describedby="ask-reason-hint">
-      <p id="ask-reason-hint" class="hint">Kept in the office log.</p>
+      <p id="ask-reason-hint" class="hint" data-t>Kept in the office log.</p>
     </div>
     <div id="ask-supplier-field" class="field" hidden>
-      <label for="ask-supplier">Supplier</label>
+      <label for="ask-supplier" data-t>Supplier</label>
       <select id="ask-supplier" name="supplier_id"></select>
     </div>
     <div id="ask-ref-field" class="field" hidden>
-      <label for="ask-ref">Supplier's payout reference</label>
+      <label for="ask-ref" data-t>Supplier's payout reference</label>
       <input id="ask-ref" name="payout_ref" type="text" autocomplete="off" maxlength="100">
     </div>
     <div id="ask-rate-field" class="field" hidden>
-      <label for="ask-rate">One-off rate (optional)</label>
+      <label for="ask-rate" data-t>One-off rate (optional)</label>
       <input id="ask-rate" name="rate" type="text" inputmode="decimal" autocomplete="off"
              maxlength="20" aria-describedby="ask-rate-hint">
-      <p id="ask-rate-hint" class="hint">LYD for 1 unit, for this order only. Empty: the supplier's rate.</p>
+      <p id="ask-rate-hint" class="hint" data-t>LYD for 1 unit, for this order only. Empty: the supplier's rate.</p>
     </div>
     <p id="ask-error" class="error" tabindex="-1" hidden></p>
     <div class="actions row">
       <button id="ask-yes" type="submit" class="button primary"></button>
-      <button id="ask-no" type="button" class="button secondary">Cancel</button>
+      <button id="ask-no" type="button" class="button secondary" data-t>Cancel</button>
     </div>
   </form>
 </div>

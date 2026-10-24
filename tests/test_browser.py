@@ -244,8 +244,9 @@ class RealPagesServedTests(unittest.TestCase):
                                 not p.startswith("/static/admin")))
         links = _Links()
         links.feed((STATIC / "admin.html").read_text("utf-8"))
-        self.assertEqual(sorted(links.found), ["/static/admin.css", "/static/admin.js",
-                                               "/static/icon.svg", "/static/style.css"])
+        self.assertEqual(sorted(links.found), ["/static/admin-strings.js", "/static/admin.css",
+                                               "/static/admin.js", "/static/icon.svg",
+                                               "/static/style.css"])
 
 
 class _Recorder:

@@ -46,6 +46,7 @@ TYPES = {
     "/static/icon.svg": "image/svg+xml",
     "/admin": "text/html; charset=utf-8",
     "/static/admin.js": "text/javascript; charset=utf-8",
+    "/static/admin-strings.js": "text/javascript; charset=utf-8",
     "/static/admin.css": "text/css; charset=utf-8",
 }
 FILES = {                           # stand-ins for app/static, by file name
@@ -56,6 +57,7 @@ FILES = {                           # stand-ins for app/static, by file name
     "icon.svg": b'<svg xmlns="http://www.w3.org/2000/svg"/>\n',
     "admin.html": b"<!doctype html>\n<title>Office</title>\n",
     "admin.js": b'"use strict"; // office\n',
+    "admin-strings.js": b'window.ADMIN_STRINGS = {};\n',
     "admin.css": b".table { inline-size: 100%; }\n",
 }
 
@@ -198,6 +200,7 @@ class PageTests(ScreensTestCase):
             "/": "index.html", "/static/app.js": "app.js", "/static/strings.js": "strings.js",
             "/static/style.css": "style.css", "/static/icon.svg": "icon.svg",
             "/admin": "admin.html", "/static/admin.js": "admin.js",
+            "/static/admin-strings.js": "admin-strings.js",
             "/static/admin.css": "admin.css"})
         self.assertEqual(web.STATIC_DIR, ROOT / "app" / "static")
         self.assertEqual(inspect.signature(web.App).parameters["static_dir"].default,
