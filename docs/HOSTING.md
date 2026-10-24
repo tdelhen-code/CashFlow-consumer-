@@ -135,6 +135,10 @@ holding workers' money and personal data.
 
    Cloudflare gives the HTTPS. The tunnel works because Cloudflare decrypts
    the traffic on its way through, so this means trusting Cloudflare with it.
+   Under *SSL/TLS > Edge Certificates*, turn on *Always Use HTTPS*, so that a
+   link starting `http://` (shared on WhatsApp, say) opens the wallet over
+   HTTPS. (Caddy also sends such visitors to `https://`; this setting does it
+   before they reach your computer.)
 4. **Get the project** with git, into a folder of your own. On Windows,
    install Git for Windows first (<https://git-scm.com/download/win>), then
    open PowerShell: it starts in your own user folder. On a Mac or Linux,
@@ -162,6 +166,8 @@ holding workers' money and personal data.
        docker compose --profile tunnel up -d --build
 
 7. **Create the first admin and check it**, as in steps 7 and 8 of section 2.
+   Also open `http://wallet.example.com/` (with `http`, not `https`): the
+   browser should end up at `https://wallet.example.com/`.
 
 To try it on this computer only, without a domain, set `SITE_ADDRESS=localhost`
 and open `https://localhost/api/ping`, then `https://localhost/` for the

@@ -12,6 +12,12 @@
 }
 
 {$SITE_ADDRESS} {
+	# Behind the tunnel Caddy serves plain http and Cloudflare gives the
+	# HTTPS; Cf-Visitor says which the visitor used. A visitor on plain http
+	# is sent to https before the page loads, so no password is typed into
+	# a page that would send it unencrypted (and the wallet would refuse).
+	@plain_http header Cf-Visitor `*"scheme":"http"*`
+	redir @plain_http https://{host}{uri} 308
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		-Server

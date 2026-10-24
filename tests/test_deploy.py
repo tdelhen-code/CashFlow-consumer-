@@ -318,6 +318,18 @@ class GuideTests(unittest.TestCase):
         for said in ("*HTTP Host Header*", "*Rocket Loader*", "*Web Analytics*"):
             self.assertIn(said, own)
 
+    def test_behind_the_tunnel_plain_http_goes_to_https(self):
+        # Caddy serves plain http behind the tunnel; a page opened over http
+        # would send the password unencrypted (and every login be refused).
+        caddy = read("deploy/Caddyfile")
+        site = caddy[caddy.index("{$SITE_ADDRESS} {"):]
+        self.assertIn('@plain_http header Cf-Visitor `*"scheme":"http"*`', site)
+        self.assertIn("redir @plain_http https://{host}{uri} 308", site)
+        self.assertLess(site.index("redir @plain_http"), site.index("reverse_proxy"))
+        own = flat(self.section(3))
+        self.assertIn("*SSL/TLS > Edge Certificates*, turn on *Always Use HTTPS*", own)
+        self.assertIn("the browser should end up at `https://wallet.example.com/`", own)
+
 
 class ImageTests(unittest.TestCase):
     def test_the_image_ships_the_screens(self):
