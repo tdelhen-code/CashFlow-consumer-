@@ -694,6 +694,58 @@ class BrowserTests(unittest.TestCase):
                          ("+218" + sam.phone[1:], "12.5", "for lunch"))
         self.assertRegex(body["idempotency_key"], r"^web-[0-9a-f]{32}$")
 
+    def test_typed_amounts_are_read_as_the_wallet_takes_them(self):
+        # Arabic-Indic and Persian digits, the Arabic decimal mark, spaces and
+        # leading zeros: the confirm step shows, and the page posts, the amount
+        # the worker meant.
+        self.prices()
+        ali, sam = self.worker("Ali", lyd=2000), self.worker("Sam")
+        page = self.page
+        self.open(page)
+        self.log_in(page, ali.phone)
+        self.go(page, "send")
+        for typed, shown, posted in (("١٢٫٥", "12.500", "12.5"),
+                                     ("۱۲۳۴", "1,234.000", "1234"),
+                                     (" 0001234.5 ", "1,234.500", None),
+                                     ("1000000", "1,000,000.000", None),
+                                     ("٠٫٠٠٥", "0.005", None)):
+            with self.subTest(typed=typed):
+                self.to_confirm(page, sam.phone, typed)
+                self.assert_text(page, "#send-confirm-amount", lyd(shown))
+                self.assert_text(page, "#send-confirm", text("send.confirm", amount=lyd(shown)))
+                if posted is None:
+                    self.tap(page, "#send-edit")
+                    continue
+                self.tap(page, "#send-confirm")
+                self.assert_step(page, "send", "done")
+                body = json.loads(self.requests(page, "POST", "/api/send")[-1][1])
+                self.assertEqual(body["amount"], posted)
+                self.tap(page, "#send-again")
+        self.assertEqual(L.balance(self.conn, sam.id), 1_246_500)
+        lookups = len(self.requests(page, "GET", "/api/recipient"))
+        for typed in ("1,000", "12.", ".5", "0.0001", "0", "١٫٢٣٤٥"):
+            with self.subTest(refused=typed):
+                page.fill("#send-phone", sam.phone)
+                page.fill("#send-amount", typed)
+                self.tap(page, "#send-next")
+                self.assert_text(page, "#send-error", text("check.amount_lyd"))
+                self.assert_step(page, "send", "form")
+        self.assertEqual(len(self.requests(page, "GET", "/api/recipient")), lookups)
+
+        self.go(page, "currency")
+        self.to_quote(page, "١٠٠٫٥")
+        self.assertEqual(json.loads(self.requests(page, "POST", "/api/quote")[-1][1])["amount"],
+                         "100.5")
+        self.assert_text(page, "#quote-summary",
+                         text("quote.summary", amount="100.50", currency="USD",
+                              cost=lyd("788.925")))
+        self.tap(page, "#order-new-price")
+        self.assert_step(page, "currency", "ask")
+        page.fill("#quote-amount", "100.505")
+        self.tap(page, "#quote-submit")
+        self.assert_text(page, "#quote-error", text("check.amount_foreign"))
+        self.assertEqual(len(self.requests(page, "POST", "/api/quote")), 1)
+
     def test_a_double_tap_sends_once(self):
         ali, sam = self.worker("Ali", lyd=100), self.worker("Sam")
         page = self.page
