@@ -168,15 +168,45 @@
     }
   }
 
+  // The button that had the focus when setBusy disabled it (the browser
+  // then moves the focus to the page's body), to be given it back.
+  var refocus = null;
+
   // A form's busy state: while busy its buttons are disabled (the handlers
   // also check their own busy flag, so a second tap or Enter does nothing).
+  // A button that lost the focus that way gets it back when enabled, if it
+  // is still shown and nothing else has taken the focus meanwhile.
   function setBusy(form, buttons, busy) {
     if (form) {
       form.setAttribute("aria-busy", busy ? "true" : "false");
     }
     buttons.forEach(function (button) {
+      if (busy && button === document.activeElement) {
+        refocus = button;
+      }
       button.disabled = busy;
     });
+    if (!busy && buttons.indexOf(refocus) >= 0) {
+      var button = refocus;
+      refocus = null;
+      if (focusIsLost() && button.getClientRects().length > 0) {
+        button.focus();
+      }
+    }
+  }
+
+  function focusIsLost() {
+    return !document.activeElement || document.activeElement === document.body;
+  }
+
+  // After "Show more", which is then hidden, the focus goes to the first
+  // item it added: where the worker was reading.
+  function focusFirstAdded(list) {
+    var item = list.children[Math.min(PAGE, list.children.length - 1)];
+    if (item && focusIsLost()) {
+      item.tabIndex = -1;
+      item.focus();
+    }
   }
 
   function filled(text) {
@@ -761,6 +791,7 @@
   function resetAll(keepPending) {
     state.epoch += 1;
     state.me = null;
+    refocus = null;
     if (!keepPending) {
       dropPending(PENDING_SEND);
       dropPending(PENDING_ORDER);
@@ -1076,6 +1107,9 @@
       byId("statement-empty").hidden = entries.length > 0;
       byId("statement-more").hidden = !(limit === PAGE && entries.length >= PAGE);
       fill(byId("home-updated"), k("home.updated"), {time: clockText(Date.now())});
+      if (limit === PAGE_MORE) {
+        focusFirstAdded(list);
+      }
     }, function (problem) {
       if (!latest()) {
         return;
@@ -1920,6 +1954,9 @@
       });
       byId("orders-empty").hidden = items.length > 0;
       byId("orders-more").hidden = !(limit === PAGE && items.length >= PAGE);
+      if (limit === PAGE_MORE) {
+        focusFirstAdded(list);
+      }
     }, function (problem) {
       if (!latest()) {
         return;

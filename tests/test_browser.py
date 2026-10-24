@@ -660,6 +660,37 @@ class BrowserTests(unittest.TestCase):
                         .endswith("/api/statement?limit=200"))
         self.assert_fits(page)
 
+    def test_refresh_and_show_more_keep_the_focus(self):
+        # With a keyboard (or a screen reader): the button is disabled while
+        # it loads, which takes the focus away; it then comes back to it, or,
+        # after "Show more" (then hidden), goes to the first entry it added.
+        self.prices()
+        omar = self.worker("Omar")
+        for n in range(55):
+            L.deposit(self.conn, omar.id, 1000, admin_id=1, into="BANK",
+                      idempotency_key=f"focus-{omar.id}-{n}")
+        page = self.page
+        self.open(page)
+        self.log_in(page, omar.phone)
+
+        def focused():
+            return page.evaluate("document.activeElement.id")
+        for screen, button in (("home", "home-refresh"), ("currency", "prices-refresh"),
+                               ("orders", "orders-refresh")):
+            with self.subTest(button):
+                self.go(page, screen)
+                page.focus(f"#{button}")
+                page.keyboard.press("Enter")
+                self.wait_idle(page)
+                self.assertEqual(focused(), button)
+        self.go(page, "home")
+        page.focus("#statement-more")
+        page.keyboard.press("Enter")
+        self.wait_idle(page)
+        expect(page.locator("#statement-list > li.entry")).to_have_count(55)
+        self.assertTrue(page.evaluate("document.activeElement ==="
+                                      " document.querySelectorAll('#statement-list > li')[50]"))
+
     def test_a_new_worker_has_no_activity(self):
         nour = self.worker("Nour")
         page = self.page
