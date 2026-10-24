@@ -987,6 +987,19 @@ class BrowserTests(unittest.TestCase):
         self.assert_text(page, "#notice", text("error.session_ended"))
         self.assertEqual(page.locator("#home-name").text_content(), "")
 
+        # So does "Show more" (shown here without 50 entries) and the
+        # orders list: never Bob's entries or orders under Ali's name.
+        for screen, button in (("home", "#statement-more"), ("orders", "#orders-refresh")):
+            with self.subTest(button):
+                self.log_in(page, ali.phone)
+                self.go(page, screen)
+                self.wait_idle(page)
+                bob_logs_in_in_another_tab()
+                page.evaluate("b => { document.querySelector(b).hidden = false; }", button)
+                self.tap(page, button)
+                self.on_screen(page, "login")
+                self.assert_text(page, "#notice", text("error.session_ended"))
+
     def test_a_balance_too_low_goes_back_to_the_form(self):
         ali, sam = self.worker("Ali", lyd=5), self.worker("Sam")
         page = self.page

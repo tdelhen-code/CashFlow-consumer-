@@ -1070,8 +1070,10 @@
     return item;
   }
 
-  // Loads the balance and the newest entries (limit PAGE), or only the
-  // entries (PAGE_MORE, "Show more"). A load started while an earlier one
+  // Loads the balance and the newest entries (limit PAGE), or more of them
+  // (PAGE_MORE, "Show more"). Both read /api/me too: entries of the worker
+  // who logged in since in another tab are never shown as this one's. A
+  // load started while an earlier one
   // is under way replaces it (the earlier one may have read the balance
   // before a send or an order): only the latest load's answer is shown.
   function loadHome(limit) {
@@ -1084,21 +1086,16 @@
     setBusy(null, buttons, true);
     list.setAttribute("aria-busy", "true");
     silence(error);
-    var calls = [api("GET", "/api/statement?limit=" + limit, null, isStatement)];
-    if (limit === PAGE) {
-      calls.push(api("GET", "/api/me", null, isMe));
-    }
-    return Promise.all(calls).then(function (answers) {
+    return Promise.all([api("GET", "/api/statement?limit=" + limit, null, isStatement),
+                        api("GET", "/api/me", null, isMe)]).then(function (answers) {
       if (!latest()) {
         return;
       }
-      if (answers.length > 1) {
-        if (!sameWorker(answers[1].data)) {
-          return toLogin(k("error.session_ended"));
-        }
-        state.me = answers[1].data;
-        showHomeMe();
+      if (!sameWorker(answers[1].data)) {
+        return toLogin(k("error.session_ended"));
       }
+      state.me = answers[1].data;
+      showHomeMe();
       var entries = answers[0].data.entries;
       list.textContent = "";
       entries.forEach(function (entry) {
@@ -1943,11 +1940,17 @@
     setBusy(null, buttons, true);
     list.setAttribute("aria-busy", "true");
     silence(error);
-    return api("GET", "/api/orders?limit=" + limit, null, isOrders).then(function (answer) {
+    // /api/me too: never the orders of a worker who logged in since in
+    // another tab.
+    return Promise.all([api("GET", "/api/orders?limit=" + limit, null, isOrders),
+                        api("GET", "/api/me", null, isMe)]).then(function (answers) {
       if (!latest()) {
         return;
       }
-      var items = answer.data.orders;
+      if (!sameWorker(answers[1].data)) {
+        return toLogin(k("error.session_ended"));
+      }
+      var items = answers[0].data.orders;
       list.textContent = "";
       items.forEach(function (order) {
         list.appendChild(orderItem(order));
