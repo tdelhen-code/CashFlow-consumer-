@@ -454,6 +454,12 @@ input[readonly] {
   margin: 0;
 }
 
+/* The button keeps its word whole ("Refresh", not "Refres" "h"); the
+   heading beside it wraps instead. */
+.heading-row .button {
+  flex: none;
+}
+
 .list {
   list-style: none;
   margin: 0 0 16px;

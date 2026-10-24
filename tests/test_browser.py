@@ -1224,6 +1224,31 @@ class BrowserTests(unittest.TestCase):
                                      [text(f"nav.{n}") for n in
                                       ("home", "send", "currency", "orders", "account")])
 
+    def test_a_button_never_splits_a_word(self):
+        # The Refresh buttons keep their word whole ("Refresh", not "Refres"
+        # and "h"); the heading next to one wraps instead.
+        page = self.page
+        self.open(page)
+        self.log_in(page, self.worker("Ali").phone)
+        for width, text_size in ((320, "130%"), (246, "100%"), (246, "130%")):
+            with self.subTest(width=width, text_size=text_size):
+                page.set_viewport_size({"width": width, "height": 740})
+                page.evaluate("s => { document.documentElement.style.fontSize = s; }",
+                              text_size)
+                for name, button in (("home", "#home-refresh"),
+                                     ("currency", "#prices-refresh"),
+                                     ("orders", "#orders-refresh")):
+                    self.go(page, name)
+                    self.wait_idle(page)
+                    lines = page.evaluate(
+                        "b => { const range = document.createRange();"
+                        " range.selectNodeContents(b);"
+                        " return new Set([...range.getClientRects()].map(r => Math.round(r.top)))"
+                        ".size; }", page.locator(button).element_handle())
+                    self.assertEqual(lines, 1, (name, page.locator(button).text_content()))
+                    self.assertLessEqual(
+                        page.evaluate("() => document.documentElement.scrollWidth"), width)
+
     def test_an_expired_quote_goes_back_to_asking(self):
         self.prices()
         ali = self.worker("Ali", lyd=1000)
