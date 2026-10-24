@@ -1384,11 +1384,13 @@
   // (the form's submit; Enter is the same submit): no key press, change of
   // the select, timer or return to the tab asks for one. The countdown
   // calls nothing; at its end the worker is taken back to ask, never while
-  // an order is under way or unsure (it may have gone through).
+  // an order is under way or unsure (it may have gone through). An order the
+  // wallet refused keeps its line there (cur.refusal), so the worker still
+  // learns why, also when the refusal came after the price's time.
 
   var cur = {
     step: "ask", pricesBusy: false, quoteBusy: false, orderBusy: false, unsure: false,
-    quote: null, date: null, arrived: 0, timer: null, seen: true
+    quote: null, date: null, arrived: 0, timer: null, seen: true, refusal: null
   };
 
   var ORDER_STATUS = {
@@ -1406,7 +1408,7 @@
     stopCountdown();
     cur = {
       step: "ask", pricesBusy: false, quoteBusy: false, orderBusy: false, unsure: false,
-      quote: null, date: null, arrived: 0, timer: null, seen: true
+      quote: null, date: null, arrived: 0, timer: null, seen: true, refusal: null
     };
     byId("prices-list").textContent = "";
     byId("prices-empty").hidden = true;
@@ -1537,7 +1539,7 @@
     } else if (cur.orderBusy || cur.unsure) {
       el.textContent = t("quote.expired_wait");
     } else {
-      backToAsk(k("error.quote_expired"), false);
+      backToAsk(cur.refusal || k("error.quote_expired"), false);
     }
   }
 
@@ -1583,6 +1585,7 @@
     cur.quote = null;
     cur.date = null;
     cur.unsure = false;
+    cur.refusal = null;
     orderFieldsLocked(false);
     silence(byId("order-error"));
     silence(byId("quote-error"));
@@ -1724,6 +1727,7 @@
       return;
     }
     silence(error);
+    cur.refusal = null;
     orderBusy(true);
     var quote = cur.quote;
     writePending(PENDING_ORDER, {owner: state.me.phone, quote: quote, date: cur.date,
@@ -1770,6 +1774,7 @@
           return;
         }
         showError(error, rule.key);
+        cur.refusal = rule.key;
         if (rule.key === k("error.balance_too_low")) {
           return refreshMe(epoch, showQuoteBalance);
         }

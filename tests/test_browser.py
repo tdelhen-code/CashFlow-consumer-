@@ -1056,6 +1056,47 @@ class BrowserTests(unittest.TestCase):
         self.on_screen(page, "orders")
         self.assertEqual(self.orders(ali.id), 2)
 
+    def test_a_refused_order_keeps_its_line_when_the_price_runs_out(self):
+        # 10 USD costs 78.500 LYD: more than Ali has, so every order is refused.
+        self.prices()
+        ali = self.worker("Ali", lyd=10)
+        page = self.page
+        page.clock.install()
+        self.open(page)
+        self.log_in(page, ali.phone)
+        self.go(page, "currency")
+
+        def lose_answer(route):
+            route.fetch()
+            route.abort()
+        for unsure_first in (False, True):
+            with self.subTest(unsure_first=unsure_first):
+                self.to_quote(page, "10")
+                if unsure_first:
+                    # The answer is lost and the price runs out meanwhile;
+                    # Try again is then refused.
+                    stop = self.intercept(page, "/api/orders", lose_answer)
+                    self.place_order(page)
+                    self.assert_text(page, "#order-error", text("order.unsure"))
+                    page.clock.fast_forward("10:00")
+                    self.assert_text(page, "#quote-left", text("quote.expired_wait"))
+                    stop()
+                    self.tap(page, "#order-submit")
+                else:
+                    self.place_order(page)
+                    self.assert_step(page, "currency", "quote")
+                    self.assert_text(page, "#order-error", text("error.balance_too_low"))
+                    page.clock.fast_forward("10:00")
+                # The countdown goes back to ask with the refusal's line, not
+                # with "This price has expired".
+                page.clock.fast_forward("00:02")
+                self.assert_step(page, "currency", "ask")
+                self.assert_text(page, "#quote-notice", text("error.balance_too_low"))
+                expect(page.locator("#order-error")).to_be_hidden()
+                self.assertEqual(page.input_value("#order-name"), "Ahmed Salem")
+        self.assertEqual(self.orders(ali.id), 0)
+        self.assertEqual(L.balance(self.conn, ali.id), 10_000)
+
     # ---------- error lines and limits ----------
 
     def test_error_lines(self):
