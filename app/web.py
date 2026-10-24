@@ -947,9 +947,9 @@ class App:
         so that a broken install (an image without app/static) shows in the
         log. Not when the app is made: the server's own first line, or its
         error such as an address it can't listen on, comes first. The bundled
-        server (main) calls this right after its first line; under any other
-        server, such as app.serve's waitress, the first request for a page
-        file that isn't there does."""
+        server (main) and app.serve call this right after their first line;
+        under any other server, the first request for a page file that isn't
+        there does."""
         if self.missing_pages and not self.warned_missing_pages:
             self.warned_missing_pages = True
             for problem in self.missing_pages:

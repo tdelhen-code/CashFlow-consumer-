@@ -353,6 +353,7 @@ def main(argv=None):
             log(f"LYD wallet on {_addresses(server)} "
                 f"(database {args.db}; proxy {args.proxy or 'none'}; "
                 f"backups {args.backup_dir or 'off'})")
+            app.warn_missing_pages()    # a broken install shows in the log at start
             if not _has_admin(args.db):
                 log("no admin yet: create the first one with python3 -m app.manage "
                     "first-admin (with Docker: docker compose exec app manage first-admin)")

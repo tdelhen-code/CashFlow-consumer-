@@ -454,6 +454,25 @@ class MainTests(Folder):
         self.assertTrue(err.getvalue().startswith("error: cannot listen on wallet.invalid"),
                         err.getvalue())
 
+    def test_a_missing_page_file_is_named_right_after_the_first_line(self):
+        # An install without app/static: the log says so at start, before
+        # anyone opens the screens.
+        def make_app(db_path):
+            return W.App(db_path, static_dir=self.dir / "no-static")
+        server = mock.Mock(effective_listen=[("127.0.0.1", 8000)])
+        server.run.side_effect = KeyboardInterrupt     # stopped as soon as it runs
+        err = io.StringIO()
+        with mock.patch.object(S.W, "make_app", make_app), \
+                mock.patch.object(S, "create_server", return_value=server), \
+                mock.patch.object(S, "_stop_on_signals"), redirect_stderr(err):
+            status = S.main(["--db", str(self.db), "--port", "0"])
+        self.assertEqual(status, 0)
+        lines = err.getvalue().splitlines()
+        self.assertIn("LYD wallet on http://127.0.0.1:8000", lines[0])
+        missing = [f"warning: {self.dir / 'no-static' / name} is missing: "
+                   "the screens won't load" for name in sorted(W.STATIC_FILES.values())]
+        self.assertEqual(sorted(lines[1:1 + len(missing)]), missing)
+
     def test_without_waitress_it_says_how_to_install_it(self):
         err = io.StringIO()
         with mock.patch.dict(sys.modules, {"waitress.server": None}), redirect_stderr(err):

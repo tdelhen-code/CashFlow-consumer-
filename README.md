@@ -236,11 +236,11 @@ keys and the `{name}`-style placeholders) and set its `meta.dir` (`rtl` for
 Arabic). Each worker then sees the language of their account (`language`),
 and English for a text that is missing. The five files are read once when the
 server starts, so a changed file needs a restart. One missing then answers 404
-and is named in the log (`warning: ... is missing: the screens won't load`):
-by `app.web` right after its first line, by `app.serve` when the file is
-first asked for. They are served with a strict `Content-Security-Policy` (only
-the page's own files and API, no inline script or style, no native form
-submit, never inside another site's frame), `X-Frame-Options: DENY`,
+and is named in the log (`warning: ... is missing: the screens won't load`)
+right after the server's first line, by `app.web` and by `app.serve`. They
+are served with a strict `Content-Security-Policy` (only the page's own files
+and API, no inline script or style, no native form submit, never inside
+another site's frame), `X-Frame-Options: DENY`,
 `nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-cache` with
 an `ETag`: a browser keeps them and asks each time whether they changed (a
 304 when they didn't), so an update shows at once. `HEAD` gets the same
