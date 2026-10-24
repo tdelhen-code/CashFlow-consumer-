@@ -568,7 +568,9 @@ input[readonly] {
 
 /* The receipt code: large, monospace, two groups of five. The groups are
    inline spans apart by a margin only, so a copy of the code (with the
-   button or by hand) has no space or line break in it. */
+   button or by hand) has no space or line break in it. Where one line is
+   too narrow (a small phone with larger text) the second group goes
+   onto the next line, whole. */
 .receipt {
   text-align: center;
 }
@@ -579,12 +581,14 @@ input[readonly] {
   font-size: 1.875rem;
   font-weight: 700;
   letter-spacing: 0.1em;
-  white-space: nowrap;
+  white-space: normal;
   user-select: all;
 }
 
-.receipt-code > span + span {
-  margin-inline-start: 0.5em;
+.receipt-code > span {
+  display: inline-block;
+  margin-inline: 0.25em;
+  white-space: nowrap;
 }
 
 .confirm-box {

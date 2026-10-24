@@ -1144,6 +1144,33 @@ class BrowserTests(unittest.TestCase):
                          text("entry.order", code=code))
         self.assertEqual(first.locator(".entry-amount").text_content(), lyd("-78.500"))
 
+    def test_the_receipt_fits_a_small_phone_with_larger_text(self):
+        # A 320 px phone with its text at 130%, and the same phone with the
+        # page zoomed to 130% (246 px wide): the code stays inside its card.
+        self.prices()
+        ali = self.worker("Ali", lyd=1000)
+        page = self.page
+        self.open(page)
+        self.log_in(page, ali.phone)
+        for width, text_size in ((320, "130%"), (246, "100%")):
+            with self.subTest(width=width, text_size=text_size):
+                page.set_viewport_size({"width": width, "height": 740})
+                page.evaluate("s => { document.documentElement.style.fontSize = s; }",
+                              text_size)
+                self.go(page, "currency")
+                self.to_quote(page, "10")
+                self.place_order(page)
+                self.assert_step(page, "currency", "receipt")
+                self.assert_fits(page)
+                inside = page.evaluate(
+                    "() => { const code = document.getElementById('receipt-code'),"
+                    " card = code.parentElement.getBoundingClientRect();"
+                    " return code.scrollWidth <= code.clientWidth && [...code.children]"
+                    ".every(group => { const box = group.getBoundingClientRect();"
+                    " return box.left >= card.left && box.right <= card.right; }); }")
+                self.assertTrue(inside, "the receipt code runs out of its card")
+                self.tap(page, "#receipt-new")
+
     def test_an_expired_quote_goes_back_to_asking(self):
         self.prices()
         ali = self.worker("Ali", lyd=1000)
