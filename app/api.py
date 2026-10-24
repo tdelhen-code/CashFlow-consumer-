@@ -30,6 +30,17 @@ def _money(dirhams):
     return {"dirhams": dirhams, "lyd": L.format_lyd(dirhams)}
 
 
+def _as_shown(user, from_phone):
+    """Refuses a money request whose page shows another worker (from_phone)
+    than the session's. Tabs of one browser share its cookie: after a second
+    worker logs in in another tab, a tab still showing the first would
+    otherwise pay from the second's account. Answered as logged out, so that
+    tab shows the login screen. Without from_phone (another client), nothing
+    is checked."""
+    if from_phone is not None and A._login_phone(from_phone) != user["phone"]:
+        raise A.NotLoggedIn("logged in as another worker; please log in")
+
+
 # ---------- worker: account ----------
 
 def me(conn, token):
@@ -81,11 +92,14 @@ def lookup_recipient(conn, token, phone):
     return {"name": other["name"], "phone": other["phone"]}
 
 
-def send_money(conn, token, to_phone, amount, *, idempotency_key, note=None):
+def send_money(conn, token, to_phone, amount, *, idempotency_key, note=None,
+               from_phone=None):
     """Send LYD to another worker. The app must create one idempotency key per
     confirm screen, so a double tap or a retry can't send twice: a retry
-    answers with the first txn_id even if the colleague was blocked since."""
+    answers with the first txn_id even if the colleague was blocked since.
+    from_phone: the worker the page shows (see _as_shown)."""
     user = _worker(conn, token)
+    _as_shown(user, from_phone)
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise L.LedgerError("idempotency key is required")
     # The books answer a retried key first; a new send to a blocked or closed
@@ -122,8 +136,9 @@ def get_quote(conn, token, currency, amount):
     return quote
 
 
-def place_order(conn, token, quote_id, beneficiary_name, beneficiary_id):
+def place_order(conn, token, quote_id, beneficiary_name, beneficiary_id, from_phone=None):
     user = _worker(conn, token)
+    _as_shown(user, from_phone)
     return _order_view(O.place_order(conn, user["id"], quote_id, beneficiary_name,
                                      beneficiary_id))
 

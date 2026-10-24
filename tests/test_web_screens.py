@@ -735,6 +735,41 @@ class TokenTests(ScreensTestCase):
         self.assert_phone_app(setup(app), app)
 
 
+class ShownWorkerTests(ScreensTestCase):
+    """A send or an order names the worker its page shows (from_phone). The
+    tabs of a browser share one cookie: after another worker logged in in
+    another tab, the session is theirs, and a tab still showing the first
+    worker must not pay from the second's account."""
+
+    def test_a_money_request_for_another_worker_is_refused(self):
+        ali_id, _ = self.worker("Ali", "0911111111", lyd=100)
+        sam_id, _ = self.worker("Sam", "0922222222")
+        bob_id, bob = self.worker("Bob", "0933333333", lyd=100)
+        refused = (401, {"error": "logged in as another worker; please log in",
+                         "type": "NotLoggedIn"})
+        send = {"to_phone": "0922222222", "amount": "10", "idempotency_key": "web-1",
+                "from_phone": "+218911111111"}
+        self.assertEqual(bob.post("/api/send", send), refused)
+        order = {"quote_id": "q", "beneficiary_name": "Ahmed", "beneficiary_id": "A1",
+                 "from_phone": "+218911111111"}
+        self.assertEqual(bob.post("/api/orders", order), refused)
+        conn = A.connect(self.db_path)
+        self.addCleanup(conn.close)
+        self.assertEqual((L.balance(conn, ali_id), L.balance(conn, bob_id),
+                          L.balance(conn, sam_id)), (100_000, 100_000, 0))
+        # The worker's own phone, however written, or none (another client).
+        for from_phone in ("0933333333", "+218 93 333 3333", None):
+            with self.subTest(from_phone=from_phone):
+                body = {**send, "idempotency_key": f"web-{from_phone}"}
+                if from_phone is None:
+                    del body["from_phone"]
+                else:
+                    body["from_phone"] = from_phone
+                status, answer = bob.post("/api/send", body)
+                self.assertEqual(status, 200, answer)
+        self.assertEqual(L.balance(conn, bob_id), 70_000)
+
+
 # ---------- English by default ----------
 
 class LanguageTests(ScreensTestCase):

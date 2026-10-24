@@ -728,6 +728,13 @@
     }
   }
 
+  // Whether an /api/me answer is still the worker this tab shows. The tabs
+  // of a browser share its cookie: once another worker has logged in in
+  // another tab, this one is logged out (R2) rather than shown their account.
+  function sameWorker(me) {
+    return !!state.me && me.phone === state.me.phone;
+  }
+
   function loggedIn(me) {
     state.me = me;
     chooseLanguage(me.language);
@@ -1051,6 +1058,9 @@
         return;
       }
       if (answers.length > 1) {
+        if (!sameWorker(answers[1].data)) {
+          return toLogin(k("error.session_ended"));
+        }
         state.me = answers[1].data;
         showHomeMe();
       }
@@ -1152,10 +1162,14 @@
   // A fresh balance: GET /api/me (it reads, never writes).
   function refreshMe(epoch, then) {
     return api("GET", "/api/me", null, isMe).then(function (answer) {
-      if (epoch === state.epoch) {
-        state.me = answer.data;
-        then();
+      if (epoch !== state.epoch) {
+        return;
       }
+      if (!sameWorker(answer.data)) {
+        return toLogin(k("error.session_ended"));
+      }
+      state.me = answer.data;
+      then();
     }, function (problem) {
       if (epoch === state.epoch) {
         return common(explain(problem));    // otherwise the last balance stays
@@ -1281,7 +1295,10 @@
       return;
     }
     var error = byId("send-confirm-error");
-    var body = {to_phone: send.to.phone, amount: send.amount, idempotency_key: send.key};
+    // from_phone: the wallet refuses the send if the cookie is now another
+    // worker's (logged in in another tab).
+    var body = {to_phone: send.to.phone, amount: send.amount, idempotency_key: send.key,
+                from_phone: state.me.phone};
     if (send.note !== "") {
       body.note = send.note;
     }
@@ -1729,13 +1746,14 @@
     silence(error);
     cur.refusal = null;
     orderBusy(true);
-    var quote = cur.quote;
-    writePending(PENDING_ORDER, {owner: state.me.phone, quote: quote, date: cur.date,
+    var quote = cur.quote, owner = state.me.phone;
+    writePending(PENDING_ORDER, {owner: owner, quote: quote, date: cur.date,
                                  arrived: cur.arrived, beneficiary_name: name,
                                  beneficiary_id: id});
     track(function () {
       var epoch = state.epoch;
-      var body = {quote_id: quote.quote_id, beneficiary_name: name, beneficiary_id: id};
+      var body = {quote_id: quote.quote_id, beneficiary_name: name, beneficiary_id: id,
+                  from_phone: owner};
       return api("POST", "/api/orders", body, isOrder).then(function (answer) {
         if (epoch !== state.epoch) {
           return;

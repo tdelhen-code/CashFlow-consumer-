@@ -539,7 +539,8 @@ def send(app, conn, req):
     _worker_limit(app, conn, req)
     return api.send_money(conn, req.token, req.get("to_phone"), req.amount("amount"),
                           idempotency_key=_idem_key(req),
-                          note=req.get("note", required=False))
+                          note=req.get("note", required=False),
+                          from_phone=req.get("from_phone", required=False))
 
 
 @route("GET", "/api/prices")
@@ -562,7 +563,8 @@ def my_orders(app, conn, req):
 def place_order(app, conn, req):
     _worker_limit(app, conn, req)
     return api.place_order(conn, req.token, req.get("quote_id"),
-                           req.get("beneficiary_name"), req.get("beneficiary_id"))
+                           req.get("beneficiary_name"), req.get("beneficiary_id"),
+                           from_phone=req.get("from_phone", required=False))
 
 
 # ---------- admin: users ----------

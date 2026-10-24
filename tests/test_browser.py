@@ -65,6 +65,7 @@ WALLET_ERRORS = [
      "error.account_unusable"),
     (401, "NotLoggedIn", "please log in", "error.session_ended"),
     (401, "NotLoggedIn", "session expired, please log in again", "error.session_ended"),
+    (401, "NotLoggedIn", "logged in as another worker; please log in", "error.session_ended"),
     (403, "PermissionDenied", "this is for workers' accounts", "error.workers_only"),
     (403, "http", "refused: sent from another website", "error.other_site"),
     (401, "LoginFailed", "wrong phone number or password, or too many wrong tries: "
@@ -868,6 +869,60 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(page.input_value("#send-phone"), "")
         self.assertEqual(page.input_value("#send-amount"), "")
         self.assertEqual(self.transactions("transfer", sam.id), 1)
+
+    def test_a_tab_left_open_never_pays_for_whoever_logged_in_since(self):
+        ali, bob, sam = (self.worker("Ali", lyd=100), self.worker("Bob", lyd=100),
+                         self.worker("Sam"))
+        self.prices()
+        page = self.page
+        self.open(page)
+        self.log_in(page, ali.phone)
+
+        def bob_logs_in_in_another_tab():
+            other = self.new_page(page.context)
+            self.open(other)
+            self.on_screen(other, "home")
+            self.go(other, "account")
+            self.tap(other, "#logout")
+            self.log_in(other, bob.phone)
+            other.close()
+
+        # Ali left the send's confirm step, and the quote step, open.
+        for screen in ("send", "currency"):
+            with self.subTest(screen):
+                self.go(page, screen)
+                if screen == "send":
+                    self.to_confirm(page, sam.phone, "10")
+                else:
+                    self.to_quote(page, "1")
+                bob_logs_in_in_another_tab()
+                if screen == "send":
+                    self.tap(page, "#send-confirm")
+                else:
+                    self.place_order(page)
+                self.on_screen(page, "login")
+                self.assert_text(page, "#notice", text("error.session_ended"))
+                self.assertNotIn(lyd("100.000"), page.content())
+                page.fill("#login-phone", ali.phone)
+                page.fill("#login-password", PASSWORD)
+                self.tap(page, "#login-submit")
+                if screen == "send":        # the send waits for Ali, unsure
+                    self.on_screen(page, "send")
+                    self.tap(page, "#send-cancel")
+                else:
+                    self.on_screen(page, "currency")
+                    self.tap(page, "#order-cancel")
+        self.assertEqual((L.balance(self.conn, ali.id), L.balance(self.conn, bob.id),
+                          L.balance(self.conn, sam.id)), (100_000, 100_000, 0))
+        self.assertEqual(self.orders(bob.id) + self.orders(ali.id), 0)
+
+        # Reading the balance again shows the change too: never Bob's account.
+        self.go(page, "home")
+        bob_logs_in_in_another_tab()
+        self.tap(page, "#home-refresh")
+        self.on_screen(page, "login")
+        self.assert_text(page, "#notice", text("error.session_ended"))
+        self.assertEqual(page.locator("#home-name").text_content(), "")
 
     def test_a_balance_too_low_goes_back_to_the_form(self):
         ali, sam = self.worker("Ali", lyd=5), self.worker("Sam")

@@ -1300,16 +1300,23 @@ class WebTests(unittest.TestCase):
         _, sams_quote = sam.post("/api/quote", {"currency": "USD", "amount": "10"})
         before = self.books()
 
-        # Ali names Sam as the payer, in every way a body could.
-        claims = {"from_phone": "0922222222", "from_user": sam_id, "user_id": sam_id,
-                  "customer_id": sam_id}
-        status, answer = ali.post("/api/send", dict(claims, to_phone="0933333333",
-                                                    amount="10", idempotency_key="k1"))
-        self.assertEqual((status, answer["type"]), (409, "InsufficientFunds"))
+        # Ali names Sam as the payer, in every way a body could: ignored, or
+        # (from_phone, the worker a screen shows) refused as not Ali's session.
+        claims = {"from_user": sam_id, "user_id": sam_id, "customer_id": sam_id}
+        for claim, refused in ((claims, (409, "InsufficientFunds")),
+                               (dict(claims, from_phone="0922222222"), (401, "NotLoggedIn"))):
+            status, answer = ali.post("/api/send", dict(claim, to_phone="0933333333",
+                                                        amount="10", idempotency_key="k1"))
+            self.assertEqual((status, answer["type"]), refused)
         status, answer = ali.post("/api/orders", dict(claims, quote_id=sams_quote["quote_id"],
                                                       beneficiary_name="Ahmed",
                                                       beneficiary_id="A1"))
         self.assertEqual(status, 404, answer)           # Sam's quote is not Ali's to use
+        status, answer = ali.post("/api/orders", dict(claims, quote_id=sams_quote["quote_id"],
+                                                      beneficiary_name="Ahmed",
+                                                      beneficiary_id="A1",
+                                                      from_phone="0922222222"))
+        self.assertEqual(status, 401, answer)
         for path, body in (("/api/admin/withdraw", {"user_id": sam_id, "amount": "10",
                                                     "from_till": "BANK",
                                                     "idempotency_key": "k2"}),
