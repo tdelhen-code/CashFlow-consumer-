@@ -1171,6 +1171,28 @@ class BrowserTests(unittest.TestCase):
                 self.assertTrue(inside, "the receipt code runs out of its card")
                 self.tap(page, "#receipt-new")
 
+    def test_the_menu_never_splits_a_word(self):
+        # A label too wide for its fifth of the bar is cut short, on one
+        # line ("Curren…"), not split over two ("Curren" and "cy").
+        page = self.page
+        self.open(page)
+        self.log_in(page, self.worker("Ali").phone)
+        for width, text_size in ((277, "100%"), (246, "100%"), (320, "130%")):
+            with self.subTest(width=width, text_size=text_size):
+                page.set_viewport_size({"width": width, "height": 740})
+                page.evaluate("s => { document.documentElement.style.fontSize = s; }",
+                              text_size)
+                for name in ("home", "currency", "account"):
+                    self.go(page, name)
+                    lines = page.evaluate(
+                        "() => [...document.querySelectorAll('#nav a span')].map(label =>"
+                        " [label.textContent, Math.round(label.getBoundingClientRect().height"
+                        " / parseFloat(getComputedStyle(label).lineHeight))])")
+                    self.assertEqual([n for _, n in lines], [1] * 5, lines)
+                    self.assertEqual([label for label, _ in lines],
+                                     [text(f"nav.{n}") for n in
+                                      ("home", "send", "currency", "orders", "account")])
+
     def test_an_expired_quote_goes_back_to_asking(self):
         self.prices()
         ali = self.worker("Ali", lyd=1000)

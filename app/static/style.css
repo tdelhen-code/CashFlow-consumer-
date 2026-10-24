@@ -205,6 +205,16 @@ a {
   line-height: 1.2;
 }
 
+/* A label is never split inside a word (the body allows that elsewhere):
+   one too wide for its fifth of the bar is cut short with an ellipsis,
+   its whole text still read out. */
+.nav a span {
+  max-inline-size: 100%;
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+}
+
 .nav a[aria-current="page"] {
   color: var(--primary);
   font-weight: 700;
