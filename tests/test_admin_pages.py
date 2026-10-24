@@ -10,8 +10,9 @@ from html.parser import HTMLParser
 from tests.test_pages import PLACEHOLDER, Page, balanced, function_body, js_calls, literal_arg, read
 
 SCREENS = ("loading", "offline", "login", "setup", "overview", "workers", "worker", "money",
-           "orders", "prices", "suppliers", "supplier", "log", "account")
-NAV = ("overview", "workers", "money", "orders", "prices", "suppliers", "log", "account")
+           "orders", "prices", "suppliers", "supplier", "approvals", "log", "account")
+NAV = ("overview", "workers", "money", "orders", "prices", "suppliers", "approvals", "log",
+       "account")
 
 
 LITERAL = r'"(?:[^"\\]|\\.)*"'
@@ -172,7 +173,7 @@ class AdminPageTests(unittest.TestCase):
         # Ids put together: a screen's section, and the setup code boxes' parts.
         for screen in SCREENS:
             self.assertIn(f"screen-{screen}", ids)
-        for box in ("code", "worker-code"):
+        for box in ("code", "worker-code", "approval-code"):
             for part in ("value", "text", "title"):
                 self.assertIn(f"{box}-{part}", ids)
         self.assertEqual(self.code.count("getElementById"), 1)

@@ -342,3 +342,12 @@ td .button {
 .table td.difference {
   font-weight: 600;
 }
+
+/* "2 changes wait for an approval", on the Overview. */
+.notice-line {
+  padding: 10px 14px;
+  background: var(--notice-bg);
+  border-inline-start: 4px solid var(--notice-line);
+  border-radius: 8px;
+  font-weight: 600;
+}

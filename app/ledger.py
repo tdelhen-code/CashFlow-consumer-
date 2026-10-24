@@ -104,6 +104,23 @@ class DatabaseTooNew(LedgerError):
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS approvals (
+  id INTEGER PRIMARY KEY,
+  action TEXT NOT NULL CHECK (action IN ('create_admin','admin_setup_code',
+                                         'unblock_admin','reactivate_admin')),
+  target INTEGER REFERENCES users(id),      -- the admin; for create_admin, once made
+  details TEXT NOT NULL,                    -- JSON: the reason, a new admin's name...
+  requested_by INTEGER NOT NULL REFERENCES users(id),
+  requested_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','approved','rejected','cancelled')),
+  decided_by INTEGER REFERENCES users(id),  -- null when approved by the owner (app.manage)
+  decided_at TEXT,
+  decision_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
   role TEXT NOT NULL CHECK (role IN ('customer','admin')),
@@ -348,6 +365,12 @@ def _upgrade(conn):
 
 @contextmanager
 def _write(conn):
+    """One write transaction. Inside one already (an approval running the
+    action it approves), it joins it: both are written together or not at
+    all, and the outer one commits."""
+    if conn.in_transaction:
+        yield
+        return
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield
@@ -916,9 +939,11 @@ def account_statement(conn, code, limit=50):
 # What each admin log action's target is: user 2, order 2 and supplier 2 are
 # all target '2', so admin_log(kind=) tells them apart.
 LOG_TARGET_KIND = {
-    **dict.fromkeys(("create_user", "set_whatsapp", "set_language", "block_user", "unblock_user",
-                     "deactivate_user", "reactivate_user", "unlock_login",
+    **dict.fromkeys(("create_user", "set_whatsapp", "set_language", "block_user",
+                     "unblock_user", "deactivate_user", "reactivate_user", "unlock_login",
                      "issue_setup_code", "setup_code_used"), "user"),
+    **dict.fromkeys(("request_approval", "approve", "reject_approval", "cancel_approval"),
+                    "approval"),
     **dict.fromkeys(("assign_supplier", "unassign_supplier", "cancel_order",
                      "mark_paid"), "order"),
     **dict.fromkeys(("deposit", "payroll", "capital", "move_money", "withdraw_cash",

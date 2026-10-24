@@ -385,6 +385,7 @@ missing key (where required) or a blank one is a 400.
 | Everyone | `GET /api/ping` (no login: `{"ok": true}` if the server and its database answer, for health checks); `POST /api/login` (`{phone, password}`), `/api/setup-password` (`{phone, code, password}`), `/api/logout` (this session), `/api/logout-everywhere` (every session of this user), `/api/change-password` (`{old_password, new_password}`; ends the other sessions) |
 | Workers (what the workers' screens use, with the Everyone routes) | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?, from_phone?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id, from_phone?}`). `from_phone` is the worker the screen shows: when the session is another worker's (who logged in since in another tab of the same browser), the request is refused as logged out (401) |
 | Admin: users | `GET /api/admin/me` (the admin logged in: `{id, name, phone, language}`), `/api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&kind=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; all filters optional; `kind` is `user`, `order`, `transaction`, `supplier` or `code`); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `en` (default), `ar` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../language` (`{language}`: `en`, `ar` or `fr`, the language their screens are shown in), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
+| Admin: approvals | `GET /api/admin/approvals?status=` (newest first; `status` is `pending`, `expired`, `approved`, `rejected` or `cancelled`; a pending one lists its possible `approvers`, empty when only the owner can approve it), `POST /api/admin/approvals/<id>/approve` (answers `{id, setup_code?}`: the account, and a setup code for the approver to give on), `.../reject` (`{reason}`), `.../cancel` (the admin who asked) |
 | Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/capital` (`{code, amount, direction, idempotency_key, note?}`: the owner's own money put into the bank or a till, `direction` `in`, or taken out, `out`), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` (the checks' `problems`, what is owed and held, and `maintenance`: see below) |
 | Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/active` (`{active: true/false, reason}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?, rate?}`; an order without a supplier needs `supplier_id`, and `rate` is a one-off rate for it); `GET /api/admin/currencies` (every currency, `active` or not, with its `price` now: `{id, rate, set_at}` or null), `/suppliers` (each with its current `prices`, `{currency: rate}`), `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
 
@@ -480,5 +481,28 @@ or order checks found problems.
 - `GET /api/ping` (no login) answers `{"ok": true}` when the server and its
   database answer, for the proxy's and the container's health checks.
 
-Not built yet: approvals (such as a second admin approving a reset of an
-admin's account). Suppliers are paid in LYD only, by design.
+Approvals (`app/approvals.py`): changes to an admin's account need a second
+admin, so no admin alone can take over another's account or make a new one:
+a new admin's account, a new setup code for an admin (resetting their
+account), and unblocking or reopening an admin. The routes that make them
+(`POST /api/admin/users` with `role` `admin`, `.../setup-code`,
+`.../unblock` and `.../reactivate` for an admin) then answer `{"pending":
+true, "approval_id": n}` and change nothing yet. Another active admin, who is
+neither the one who asked nor the account's admin, approves it on the
+Approvals screen, and the change is made then, in their name. A setup code it
+makes is shown to the approver only, never to the admin who asked. Blocking or
+closing an admin stays immediate, so a misused account can be stopped at once.
+When there is no such admin (with two admins, one asking about the other),
+the owner approves on the server:
+
+    python3 -m app.manage approvals --db wallet.db       # what is waiting
+    python3 -m app.manage approve 3 --db wallet.db       # shows any setup code
+
+(with Docker: `docker compose exec app manage approvals`). The only active
+admin needs nobody: their change is made at once (`"pending": false`, with
+`id` and the `setup_code`), as for the first admins of a new wallet. A request
+expires after 24 hours; another admin can reject it (with a reason) and the
+one who asked can cancel it. Each step is in the admin log (kind
+`approval`). Workers' accounts don't need approvals.
+
+Suppliers are paid in LYD only, by design.

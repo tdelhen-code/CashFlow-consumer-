@@ -579,6 +579,74 @@ class AdminBrowserTests(unittest.TestCase):
         self.on_screen("login", arabic)
         self.assertEqual(arabic.get_attribute("html", "lang"), "ar")
 
+    def test_an_admins_reset_waits_for_another_admin_who_gets_the_code(self):
+        rania, rania_phone = self.office_admin("Rania", "en")
+        target, _ = self.office_admin("Tarek", "en")
+        _, sami_phone = self.office_admin("Sami", "en")
+        # Rania asks for a new setup code for Tarek: nothing is made yet.
+        asking = self.new_page()
+        self.log_in(asking, rania_phone, PASSWORD)
+        self.open(f"#/worker/{target}", "worker", asking)
+        asking.locator("#worker-actions").get_by_role("button", name="New setup code").click()
+        asking.fill("#ask-reason", "forgot the password")
+        self.click("#ask-yes", asking)
+        expect(asking.locator("#notice")).to_have_text(
+            "Sent for approval: another admin must approve the new setup code for Tarek. "
+            "They get the code.")
+        expect(asking.locator("#worker-code-box")).to_be_hidden()
+        codes = "SELECT COUNT(*) FROM setup_codes WHERE user_id = ?"
+        before = self.count(codes, target)
+        self.open("#/approvals", "approvals", asking)
+        card = asking.locator("#approvals-list li", has_text="New setup code for Tarek")
+        expect(card).to_contain_text("Asked by Rania")
+        expect(card.get_by_role("button", name="Approve")).to_have_count(0)
+        expect(card.get_by_role("button", name="Cancel the request")).to_be_visible()
+        # Sami sees it waiting on the Overview, and approves it: he gets the code.
+        approving = self.new_page()
+        self.log_in(approving, sami_phone, PASSWORD)
+        expect(approving.locator("#overview-approvals")).to_be_visible()
+        self.click("#overview-approvals-link", approving)
+        self.on_screen("approvals", approving)
+        card = approving.locator("#approvals-list li", has_text="New setup code for Tarek")
+        card.get_by_role("button", name="Approve").click()
+        self.click("#ask-yes", approving)
+        expect(approving.locator("#approval-code-box")).to_be_visible()
+        code = approving.text_content("#approval-code-value")
+        self.assertEqual(self.count(codes, target), before + 1)
+        A.set_password_with_code(self.conn, self.conn.execute(
+            "SELECT phone FROM users WHERE id = ?", (target,)).fetchone()[0], code, PASSWORD)
+        expect(approving.locator("#approvals-rows")).to_contain_text("Approved by Sami")
+        self.assertEqual(self.count("SELECT COUNT(*) FROM approvals WHERE target = ? AND "
+                                    "status = 'pending'", target), 0)
+
+    def test_a_new_admin_waits_and_can_be_rejected(self):
+        _, rania_phone = self.office_admin("Rania2", "en")
+        self.log_in()               # the first admin asks
+        page = self.page
+        self.open("#/workers", "workers")
+        page.click("#workers-add-open")
+        page.fill("#worker-add-name", "Waleed")
+        page.fill("#worker-add-phone", "0935550199")
+        page.select_option("#worker-add-role", "admin")
+        self.click("#worker-add-submit")
+        expect(page.locator("#notice")).to_contain_text(
+            "Sent for approval: another admin must approve Waleed's account.")
+        expect(page.locator("#code-box")).to_be_hidden()
+        self.assertEqual(self.count("SELECT COUNT(*) FROM users WHERE name = 'Waleed'"), 0)
+        other = self.new_page()
+        self.log_in(other, rania_phone, PASSWORD)
+        self.open("#/approvals", "approvals", other)
+        card = other.locator("#approvals-list li", has_text="New admin: Waleed")
+        card.get_by_role("button", name="Reject").click()
+        self.click("#ask-yes", other)
+        self.assert_text("#ask-error", "Fill in every field first.", other)
+        other.fill("#ask-reason", "not hired yet")
+        self.click("#ask-yes", other)
+        self.assert_text("#notice", "Rejected.", other)
+        expect(other.locator("#approvals-rows")).to_contain_text(
+            "Rejected by Rania2: not hired yet")
+        self.assertEqual(self.count("SELECT COUNT(*) FROM users WHERE name = 'Waleed'"), 0)
+
     def test_an_ended_session_goes_back_to_the_login(self):
         self.log_in()
         self.open("#/workers", "workers")
@@ -608,6 +676,7 @@ class AdminBrowserTests(unittest.TestCase):
         page = self.new_page(PHONE)
         self.log_in(page)
         for hash_, screen in (("#/overview", "overview"), ("#/workers", "workers"),
+                              ("#/approvals", "approvals"),
                               (f"#/worker/{uid}", "worker"), ("#/money", "money"),
                               ("#/orders", "orders"),
                               ("#/prices", "prices"), ("#/suppliers", "suppliers"),

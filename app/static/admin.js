@@ -399,7 +399,8 @@
   };
 
   var SCREENS = ["loading", "offline", "login", "setup", "overview", "workers", "worker",
-                 "money", "orders", "prices", "suppliers", "supplier", "log", "account"];
+                 "money", "orders", "prices", "suppliers", "supplier", "approvals", "log",
+                 "account"];
   var NAV_OF = {worker: "workers", supplier: "suppliers"};
 
   function show(name) {
@@ -794,7 +795,9 @@
     return parts.join(" ");
   }
 
-  onClick("overview-refresh", "overview-error", loadHealth);
+  onClick("overview-refresh", "overview-error", function () {
+    return Promise.all([loadHealth(), loadWaiting()]);
+  });
 
   onSubmit("till-form", "till-error", function () {
     var name = byId("till-name").value;
@@ -927,7 +930,7 @@
     if (title) {
       byId(box + "-title").textContent = title;
     }
-    byId(box === "code" ? "code-box" : "worker-code-box").hidden = false;
+    byId(box + "-box").hidden = false;
     byId(box + "-title").focus();
   }
 
@@ -945,6 +948,11 @@
     return post("/api/admin/users", body).then(function (made) {
       byId("worker-add-form").reset();
       byId("worker-add").hidden = true;
+      if (made.pending) {         // a new admin: another admin approves it
+        notify(t("Sent for approval: another admin must approve {name}'s account. They " +
+                 "get the setup code.", {name: body.name}));
+        return null;
+      }
       showCode("code", t("{name}'s account is ready", {name: body.name}), made.setup_code,
                "", body.name);
       return loadUsers().then(drawUsers);
@@ -1076,13 +1084,17 @@
     var box = byId("worker-actions");
     clear(box);
     var who = {name: user.name};
+    function pendingText() {
+      return t("Sent for approval: another admin must approve this change to {name}'s " +
+               "account.", who);
+    }
     function action(label, path, title, text, doneText, danger) {
       box.appendChild(button(label, danger ? "danger-outline" : "secondary", function () {
         ask({title: title, text: text, reason: true, yes: label, danger: danger,
              act: function (values) {
                return post("/api/admin/users/" + user.id + "/" + path,
-                           {reason: values.reason}).then(function () {
-                 notify(doneText);
+                           {reason: values.reason}).then(function (answer) {
+                 notify(answer.pending ? pendingText() : doneText);
                  return loadWorker();
                });
              }});
@@ -1127,7 +1139,12 @@
         var body = values.reason ? {reason: values.reason} : {};
         return post("/api/admin/users/" + user.id + "/setup-code", body).then(function (got) {
           closeAsk();
-          showCode("worker-code", null, got.setup_code, "", user.name);
+          if (got.pending) {      // an admin's account: another admin approves it
+            notify(t("Sent for approval: another admin must approve the new setup code " +
+                     "for {name}. They get the code.", {name: user.name}));
+          } else {
+            showCode("worker-code", null, got.setup_code, "", user.name);
+          }
           return loadWorker();
         });
       }
@@ -2094,6 +2111,158 @@
     return null;
   });
 
+  // ---------- approvals ----------
+
+  var approvals = {seq: 0};
+
+  var CHANGE = {
+    create_admin: k("New admin: {name}"), admin_setup_code: k("New setup code for {name}"),
+    unblock_admin: k("Unblock {name}"), reactivate_admin: k("Reopen {name}'s account")
+  };
+
+  // The kind of change, without whose (the office log's details).
+  var CHANGE_KIND = {
+    create_admin: k("a new admin"), admin_setup_code: k("an admin's setup code"),
+    unblock_admin: k("unblocking an admin"), reactivate_admin: k("reopening an admin")
+  };
+
+  function nameOf(id) {
+    var user = userById(id);
+    return user ? user.name : "#" + id;
+  }
+
+  function changeText(item) {
+    var name = item.action === "create_admin" ?
+      item.details.name + " (" + phoneText(item.details.phone) + ")" : nameOf(item.target);
+    return has(CHANGE, item.action) ? t(CHANGE[item.action], {name: name}) : item.action;
+  }
+
+  function outcomeText(item) {
+    if (item.status === "approved") {
+      return item.decided_by === null ? t("Approved by the owner, on the server") :
+        t("Approved by {name}", {name: nameOf(item.decided_by)});
+    }
+    if (item.status === "rejected") {
+      return t("Rejected by {name}: {reason}", {name: nameOf(item.decided_by),
+                                                 reason: item.decision_reason});
+    }
+    return item.status === "cancelled" ? t("Cancelled by the admin who asked") :
+      t("Expired: nobody approved it in time");
+  }
+
+  function openApprovals() {
+    silence(byId("approvals-error"));
+    return loadApprovals();
+  }
+
+  function loadApprovals() {
+    var seq = (approvals.seq += 1);
+    return Promise.all([get("/api/admin/approvals?limit=100"), loadUsers()])
+      .then(function (got) {
+        if (seq === approvals.seq) {
+          drawApprovals(got[0].approvals);
+        }
+      }, function (problem) {
+        if (seq === approvals.seq) {
+          handle(problem, byId("approvals-error"));
+        }
+      });
+  }
+
+  function drawApprovals(list) {
+    var ul = byId("approvals-list"), rows = byId("approvals-rows"), waiting = 0, decided = 0;
+    clear(ul);
+    clear(rows);
+    list.forEach(function (item) {
+      if (item.status !== "pending") {
+        decided += 1;
+        var row = make("tr");
+        cell(row, when(item.decided_at || item.expires_at), "nowrap");
+        cell(row, changeText(item)).dir = "auto";
+        cell(row, nameOf(item.requested_by)).dir = "auto";
+        cell(row, outcomeText(item)).dir = "auto";
+        rows.appendChild(row);
+        return;
+      }
+      waiting += 1;
+      var li = make("li", "order-card");
+      li.setAttribute("data-approval", String(item.id));
+      li.appendChild(make("p", "strong", changeText(item))).dir = "auto";
+      li.appendChild(make("p", null, t("Asked by {name} {time}: {reason}", {
+        name: nameOf(item.requested_by), time: when(item.requested_at),
+        reason: item.details.reason}))).dir = "auto";
+      li.appendChild(make("p", "muted small", t("Waits until {time}",
+                                                 {time: when(item.expires_at)})));
+      var actions = make("div", "button-row"), me = state.me.id;
+      if (item.requested_by === me) {
+        actions.appendChild(button(t("Cancel the request"), "secondary", function () {
+          askDecision(item, "cancel");
+        }));
+      } else if (item.approvers.indexOf(me) >= 0) {
+        actions.appendChild(button(t("Approve"), "primary", function () {
+          askDecision(item, "approve");
+        }));
+        actions.appendChild(button(t("Reject"), "danger-outline", function () {
+          askDecision(item, "reject");
+        }));
+      }
+      li.appendChild(actions);
+      if (item.approvers.indexOf(me) < 0 && item.requested_by !== me) {
+        li.appendChild(make("p", "muted small", t("It is about your account: another admin " +
+                                                  "must approve it.")));
+      }
+      if (!item.approvers.length) {
+        li.appendChild(make("p", "muted small", t("No other admin can approve it: the " +
+          "owner approves it on the server (app.manage approve {id}).", {id: item.id})));
+      }
+      ul.appendChild(li);
+    });
+    byId("approvals-empty").hidden = waiting > 0;
+    byId("approvals-done-empty").hidden = decided > 0;
+  }
+
+  function askDecision(item, decision) {
+    var facts = [[t("Change"), changeText(item)],
+                 [t("Asked by"), nameOf(item.requested_by)],
+                 [t("Reason"), item.details.reason]];
+    var question = {
+      approve: {title: t("Approve this change?"), yes: t("Approve"),
+                text: t("It is made now, in your name. A setup code it makes is shown to " +
+                        "you once: give it to them in person.")},
+      reject: {title: t("Reject this change?"), yes: t("Reject"), reason: true, danger: true},
+      cancel: {title: t("Cancel your request?"), yes: t("Cancel the request")}
+    }[decision];
+    ask({
+      title: question.title, facts: facts, text: question.text, reason: question.reason,
+      yes: question.yes, danger: question.danger,
+      act: function (values) {
+        var body = decision === "reject" ? {reason: values.reason} : {};
+        return post("/api/admin/approvals/" + item.id + "/" + decision, body)
+          .then(function (answer) {
+            closeAsk();
+            if (decision === "approve" && answer.setup_code) {
+              var name = item.action === "create_admin" ? item.details.name :
+                nameOf(item.target);
+              showCode("approval-code", t("Approved: {change}", {change: changeText(item)}),
+                       answer.setup_code, "", name);
+            } else {
+              notify(decision === "approve" ? t("Approved: {change}",
+                                                {change: changeText(item)}) :
+                     decision === "reject" ? t("Rejected.") : t("Your request is cancelled."));
+            }
+            return loadApprovals();
+          });
+      }
+    });
+  }
+
+  byId("approval-code-done").addEventListener("click", function () {
+    byId("approval-code-box").hidden = true;
+    byId("approval-code-value").textContent = "";
+  });
+
+  onClick("approvals-refresh", "approvals-error", loadApprovals);
+
   // ---------- log ----------
 
   var log = {limit: PAGE, seq: 0};
@@ -2112,7 +2281,9 @@
     pay_supplier: k("Paid a supplier"), add_supplier: k("Added a supplier"),
     set_supplier_price: k("Set a supplier's rate"), set_supplier_active: k("Supplier on/off"),
     add_till: k("Added a till"), add_currency: k("Added a currency"),
-    set_currency_active: k("Currency on/off"), set_price: k("Set a price")
+    set_currency_active: k("Currency on/off"), set_price: k("Set a price"),
+    request_approval: k("Asked for an approval"), approve: k("Approved a change"),
+    reject_approval: k("Rejected a change"), cancel_approval: k("Cancelled a request")
   };
 
   function targetText(entry) {
@@ -2133,6 +2304,9 @@
     if (entry.target_kind === "supplier") {
       return supplierName(id);
     }
+    if (entry.target_kind === "approval") {
+      return t("request #{id}", {id: entry.target});
+    }
     return String(entry.target);
   }
 
@@ -2148,7 +2322,8 @@
     into: k("into"), till: k("till"), source: k("from"), destination: k("to"),
     direction: k("direction"), batch_ref: k("reference"), reference: k("reference"),
     workers: k("workers"), reverses: k("reverses"), active: k("in use"),
-    receipt: k("receipt"), code: k("code")
+    receipt: k("receipt"), code: k("code"), change: k("change"),
+    requested_by: k("asked by"), by: k("by")
   };
 
   function detailText(details) {
@@ -2158,7 +2333,9 @@
       var value = details[key];
       if (MONEY_DETAILS[key] && typeof value === "number") {
         value = lyd(value);
-      } else if (key === "user_id") {
+      } else if (key === "change" && has(CHANGE_KIND, value)) {
+        value = t(CHANGE_KIND[value]);
+      } else if (key === "user_id" || key === "requested_by") {
         value = (userById(value) || {name: "#" + value}).name;
       } else if (key === "supplier_id") {
         value = supplierName(value);
@@ -2224,8 +2401,19 @@
 
   function openOverview() {
     silence(byId("overview-error"));
-    return loadHealth().catch(function (problem) {
+    return Promise.all([loadHealth(), loadWaiting()]).catch(function (problem) {
       handle(problem, byId("overview-error"));
+    });
+  }
+
+  // The Overview's line about requests waiting for an approval.
+  function loadWaiting() {
+    return get("/api/admin/approvals?status=pending").then(function (data) {
+      var count = data.approvals.length, line = byId("overview-approvals");
+      byId("overview-approvals-link").textContent = count === 1 ?
+        t("1 change to an admin's account waits for an approval") :
+        t("{count} changes to admins' accounts wait for an approval", {count: count});
+      line.hidden = count === 0;
     });
   }
 
@@ -2238,6 +2426,7 @@
     prices: openPrices,
     suppliers: openSuppliers,
     supplier: openSupplier,
+    approvals: openApprovals,
     log: openLog,
     account: function () {
       byId("my-language").value = state.me.language;

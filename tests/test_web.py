@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 from wsgiref.util import setup_testing_defaults
 
+from app import approvals as P
 from app import auth as A
 from app import ledger as L
 from app import orders as O
@@ -1041,9 +1042,18 @@ class WebTests(unittest.TestCase):
 
     # --- helpers for the admin, owner-rule and race tests below ---
     def new_admin(self, name, phone, password):
+        """Another admin, with their password set. Once there are two admins
+        a new one waits for an approval: the owner's (app.manage approve)."""
         status, made = self.admin.post("/api/admin/users", {
             "name": name, "phone": phone, "role": "admin", "reason": "new admin"})
         self.assertEqual(status, 200, made)
+        if made["pending"]:
+            conn = A.connect(self.db_path)
+            try:
+                done = P.approve(conn, made["approval_id"])
+            finally:
+                conn.close()
+            made = {"id": done["user_id"], "setup_code": done["setup_code"]}
         client = Client(self.app, ip=f"10.0.2.{made['id']}")
         status, body = client.post("/api/setup-password", {
             "phone": phone, "code": made["setup_code"], "password": password})
@@ -1098,6 +1108,10 @@ class WebTests(unittest.TestCase):
         reason = {"reason": "checking"}
         requests = {
             "GET /api/admin/me": "/api/admin/me",
+            "GET /api/admin/approvals": "/api/admin/approvals?status=pending",
+            "POST /api/admin/approvals/<id>/approve": ("/api/admin/approvals/1/approve", {}),
+            "POST /api/admin/approvals/<id>/reject": ("/api/admin/approvals/1/reject", reason),
+            "POST /api/admin/approvals/<id>/cancel": ("/api/admin/approvals/1/cancel", {}),
             "GET /api/admin/users": "/api/admin/users",
             "POST /api/admin/users": ("/api/admin/users", {
                 "name": "Omar", "phone": "0944444444", "role": "admin", **reason}),
@@ -1177,6 +1191,12 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.admin.get("/api/admin/me")[1]["language"], "fr")
         logged = self.admin.get(f"/api/admin/log?action=set_language&kind=user&target={ali_id}")
         self.assertEqual([e["details"] for e in logged[1]["entries"]], [{"language": "ar"}])
+
+    def test_an_admins_statement_is_empty(self):
+        # The office's page for an admin's account asks for it like a worker's.
+        self.assertEqual(self.admin.get("/api/admin/users/1/statement"), (200, {
+            "balance": {"dirhams": 0, "lyd": "0.000"}, "entries": []}))
+        self.assertEqual(self.admin.get("/api/admin/users/99/statement")[0], 404)
 
     def test_what_the_office_screens_read(self):
         ali_id, ali = self.new_worker("Ali", "0921111111", "Garden-Lamp-4821")

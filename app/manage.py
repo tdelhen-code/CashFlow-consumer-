@@ -6,6 +6,8 @@
     python3 -m app.manage check --db wallet.db
     python3 -m app.manage check-backup backups/wallet-20261018T052600Z.db.gz
     python3 -m app.manage restore backups/wallet-20261018T052600Z.db.gz --db wallet.db
+    python3 -m app.manage approvals --db wallet.db
+    python3 -m app.manage approve 3 --db wallet.db
 
 Exit status: 0 done; 1 failed, including a mistyped command (a plain message
 on stderr); 2 for backup and check when the ledger or order checks found
@@ -26,6 +28,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from . import approvals as P
 from . import auth as A
 from . import backup as B
 from . import ledger as L
@@ -63,6 +66,60 @@ def first_admin(args):
     finally:
         conn.close()
     _say(f"first admin created (user {user_id}); log in with that phone and password")
+    return OK
+
+
+CHANGES = {"create_admin": "a new admin's account", "admin_setup_code": "a new setup code for",
+           "unblock_admin": "unblock", "reactivate_admin": "reopen the account of"}
+
+
+def _describe(conn, item):
+    """One request in a line: what, for whom, who asked, and why."""
+    def name(user_id):
+        row = conn.execute("SELECT name, phone FROM users WHERE id = ?", (user_id,)).fetchone()
+        return f"{row['name']} ({row['phone']})" if row else f"user {user_id}"
+    details = item["details"]
+    whom = (f"{details['name']} ({details['phone']})" if item["action"] == "create_admin"
+            else name(item["target"]))
+    return (f"#{item['id']} {CHANGES[item['action']]} {whom}; asked by "
+            f"{name(item['requested_by'])} at {item['requested_at'][:16]} UTC: "
+            f"{details['reason']}")
+
+
+def approvals(args):
+    conn = A.connect(args.db)
+    try:
+        waiting = P.listing(conn, status="pending")
+        if not waiting:
+            _say("no request is waiting")
+        for item in waiting:
+            only = "" if item["approvers"] else " [only the owner can approve it]"
+            _say(_describe(conn, item) + only)
+    finally:
+        conn.close()
+    return OK
+
+
+def approve(args):
+    """The owner's approval, for a request no other admin can approve (or
+    when none is around). It is made in the name of the admin who asked."""
+    conn = A.connect(args.db)
+    try:
+        item = next((i for i in P.listing(conn, limit=10**6) if i["id"] == args.id), None)
+        if item is None:
+            raise Failed(f"no request #{args.id}")
+        if item["status"] != "pending":
+            raise Failed(f"request #{args.id} is {item['status']}")
+        _say(_describe(conn, item))
+        if not args.yes and input("Approve it? Type yes: ").strip().lower() != "yes":
+            raise Failed("not approved")
+        result = P.approve(conn, args.id)
+    finally:
+        conn.close()
+    _say(f"approved: request #{args.id} is done")
+    if "setup_code" in result:
+        _say(f"setup code: {result['setup_code']} (give it to them in person; it is "
+             f"not shown again)")
     return OK
 
 
@@ -198,6 +255,18 @@ def _parser():
     _db(p)
     p.add_argument("--yes", action="store_true", help="don't ask to confirm")
     p.set_defaults(func=restore)
+
+    p = commands.add_parser("approvals", help="list the admin-account changes waiting "
+                                              "for an approval")
+    _db(p)
+    p.set_defaults(func=approvals)
+
+    p = commands.add_parser("approve", help="approve one, as the owner (shows any setup "
+                                            "code it makes)")
+    p.add_argument("id", type=int)
+    _db(p)
+    p.add_argument("--yes", action="store_true", help="don't ask to confirm")
+    p.set_defaults(func=approve)
     return parser
 
 

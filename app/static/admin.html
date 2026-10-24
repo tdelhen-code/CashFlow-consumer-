@@ -41,6 +41,7 @@
   <a data-nav="orders" href="#/orders" data-t>Orders</a>
   <a data-nav="prices" href="#/prices" data-t>Prices</a>
   <a data-nav="suppliers" href="#/suppliers" data-t>Suppliers</a>
+  <a data-nav="approvals" href="#/approvals" data-t>Approvals</a>
   <a data-nav="log" href="#/log" data-t>Log</a>
   <a data-nav="account" href="#/account" data-t>Account</a>
 </nav>
@@ -122,6 +123,7 @@
   </div>
   <p id="overview-error" class="error" tabindex="-1" hidden></p>
   <p id="overview-checks" class="check-line"></p>
+  <p id="overview-approvals" class="notice-line" hidden><a id="overview-approvals-link" href="#/approvals"></a></p>
   <ul id="overview-problems" class="plain-list error-list" hidden></ul>
   <div class="tiles">
     <div class="card tile">
@@ -699,6 +701,40 @@
   <button id="supplier-more" type="button" class="button secondary" hidden data-t>Show more</button>
 </section>
 
+<!-- ---------- approvals ---------- -->
+
+<section id="screen-approvals" data-screen="approvals" aria-labelledby="approvals-title" hidden>
+  <div class="heading-row">
+    <h1 id="approvals-title" tabindex="-1" data-t>Approvals</h1>
+    <button id="approvals-refresh" type="button" class="button small secondary" data-t>Refresh</button>
+  </div>
+  <p class="muted small" data-t>Changes to an admin's account need a second admin: a new admin, a new setup code for an admin, and unblocking or reopening an admin. The admin who asks can't approve, nor can the account's own admin. A setup code is shown to the admin who approves.</p>
+  <p id="approvals-error" class="error" tabindex="-1" hidden></p>
+
+  <div id="approval-code-box" class="card code-box" hidden>
+    <h2 id="approval-code-title" class="success-title" tabindex="-1"></h2>
+    <p id="approval-code-value" class="receipt-code num"></p>
+    <p id="approval-code-text"></p>
+    <button id="approval-code-done" type="button" class="button small secondary" data-t>Done</button>
+  </div>
+
+  <h2 data-t>Waiting</h2>
+  <ul id="approvals-list" class="list order-cards" aria-busy="false"></ul>
+  <p id="approvals-empty" class="empty" hidden data-t>Nothing is waiting.</p>
+
+  <h2 data-t>Decided</h2>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr>
+        <th scope="col" data-t>When</th><th scope="col" data-t>What</th>
+        <th scope="col" data-t>Asked by</th><th scope="col" data-t>Outcome</th>
+      </tr></thead>
+      <tbody id="approvals-rows"></tbody>
+    </table>
+  </div>
+  <p id="approvals-done-empty" class="empty" hidden data-t>Nothing yet.</p>
+</section>
+
 <!-- ---------- log ---------- -->
 
 <section id="screen-log" data-screen="log" aria-labelledby="log-title" hidden>
@@ -716,6 +752,7 @@
       <option value="order" data-t>Orders</option>
       <option value="supplier" data-t>Suppliers</option>
       <option value="code" data-t>Currencies, prices and tills</option>
+      <option value="approval" data-t>Approvals</option>
     </select>
   </div>
   <p id="log-error" class="error" tabindex="-1" hidden></p>

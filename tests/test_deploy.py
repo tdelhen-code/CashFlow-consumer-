@@ -301,15 +301,16 @@ class GuideTests(unittest.TestCase):
 
     def test_the_guide_says_which_screens_there_are(self):
         intro = flat(between(self.hosting, "The wallet runs the same way", "\n## 1."))
-        self.assertIn("(the workers' screens and the API; the admin screens are still to come)",
-                      intro)
+        self.assertIn("(the workers' screens, the office's screens and the API)", intro)
         where = flat(self.section(1))
         self.assertIn("The workers' screens are at the wallet's address", where)
-        self.assertIn("The admin screens are still to come", where)
+        self.assertIn("The office's screens are at `https://<your address>/admin`", where)
+        self.assertNotIn("still to come", self.hosting)
         self.assertNotIn("no screens yet", self.hosting)
         self.assertNotIn("look at a few balances", self.hosting)
         self.assertIn("python3 -m app.manage check --db test.db", commands(self.hosting))
-        self.assertIn("for now an API call with an admin's login", flat(self.section(7)))
+        self.assertIn("The office's Overview screen (`/admin`)", flat(self.section(7)))
+        self.assertIn("docker compose exec app manage approve 3", commands(self.section(7)))
 
     def test_the_tunnel_keeps_the_address_and_the_page_as_they_are(self):
         # The wallet refuses a browser's request whose Host is not the address

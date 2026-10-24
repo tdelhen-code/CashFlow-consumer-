@@ -74,6 +74,7 @@ from urllib.parse import parse_qs
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from . import api
+from . import approvals as P
 from . import auth as A
 from . import ledger as L
 from . import orders as O
@@ -597,14 +598,35 @@ def admin_users(app, conn, req):
     return {"users": [dict(r, balance_lyd=L.format_lyd(r["balance"])) for r in rows]}
 
 
+def _is_admin(conn, user_id):
+    row = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+    return row is not None and row["role"] == "admin"
+
+
+def _asked(result):
+    """An approvals.request answer: waiting for another admin, or done at once
+    (the only active admin) with what the change gives."""
+    if "approval_id" in result:
+        return {"approval_id": result["approval_id"], "pending": True}
+    done = result["done"]
+    return {"pending": False, "id": done["user_id"],
+            **({"setup_code": done["setup_code"]} if "setup_code" in done else {})}
+
+
 @route("POST", "/api/admin/users")
 def admin_create_user(app, conn, req):
     admin = _admin(conn, req)
+    role = req.get("role", required=False) or "customer"
+    if role == "admin":         # a second admin approves it (app.approvals)
+        return _asked(P.request(conn, "create_admin", admin_id=admin, details={
+            "name": req.get("name"), "phone": req.get("phone"),
+            "language": req.get("language", required=False) or "en",
+            "whatsapp": req.get("whatsapp", required=False),
+            "reason": req.get("reason", required=False) or "new admin"}))
     # Every field is checked before the user is written: a bad one is a 400
     # with nothing made, not an account without a code that a retry can't make.
     reason = req.get("reason", required=False) or "new account"
-    user_id = L.create_user(conn, req.get("role", required=False) or "customer",
-                            req.get("name"), req.get("phone"),
+    user_id = L.create_user(conn, role, req.get("name"), req.get("phone"),
                             req.get("language", required=False) or "en",
                             admin_id=admin, whatsapp=req.get("whatsapp", required=False))
     code = A.issue_setup_code(conn, user_id, admin_id=admin, reason=reason)
@@ -613,7 +635,11 @@ def admin_create_user(app, conn, req):
 
 @route("POST", "/api/admin/users/<id>/setup-code")
 def admin_setup_code(app, conn, req):
-    return {"setup_code": A.issue_setup_code(conn, req.int("id"), admin_id=_admin(conn, req),
+    admin, user_id = _admin(conn, req), req.int("id")
+    if _is_admin(conn, user_id):
+        return _asked(P.request(conn, "admin_setup_code", admin_id=admin, target=user_id,
+                                details={"reason": req.get("reason", required=False)}))
+    return {"setup_code": A.issue_setup_code(conn, user_id, admin_id=admin,
                                              reason=req.get("reason", required=False))}
 
 
@@ -633,23 +659,61 @@ def admin_language(app, conn, req):
     return {"ok": True}
 
 
-def _user_action(func):
+def _user_action(func, guarded=None):
+    """`guarded`: for an admin's account, the approvals action asked instead."""
     def handler(app, conn, req):
-        func(conn, req.int("id"), admin_id=_admin(conn, req), reason=req.get("reason"))
+        admin, user_id = _admin(conn, req), req.int("id")
+        if guarded and _is_admin(conn, user_id):
+            return dict(_asked(P.request(conn, guarded, admin_id=admin, target=user_id,
+                                         details={"reason": req.get("reason")})), ok=True)
+        func(conn, user_id, admin_id=admin, reason=req.get("reason"))
         return {"ok": True}
     return handler
 
 
-for _name, _func in (("block", L.block_user), ("unblock", L.unblock_user),
-                     ("deactivate", L.deactivate_user), ("reactivate", L.reactivate_user),
-                     ("unlock", A.unlock_login)):
-    route("POST", f"/api/admin/users/<id>/{_name}")(_user_action(_func))
+for _name, _func, _guarded in (
+        ("block", L.block_user, None), ("unblock", L.unblock_user, "unblock_admin"),
+        ("deactivate", L.deactivate_user, None),
+        ("reactivate", L.reactivate_user, "reactivate_admin"),
+        ("unlock", A.unlock_login, None)):
+    route("POST", f"/api/admin/users/<id>/{_name}")(_user_action(_func, _guarded))
+
+
+# ---------- admin: approvals (app.approvals) ----------
+
+@route("GET", "/api/admin/approvals")
+def admin_approvals(app, conn, req):
+    _admin(conn, req)
+    return {"approvals": P.listing(conn, status=req.query.get("status") or None,
+                                   limit=_limit(req))}
+
+
+@route("POST", "/api/admin/approvals/<id>/approve")
+def admin_approve(app, conn, req):
+    result = P.approve(conn, req.int("id"), admin_id=_admin(conn, req))
+    return {"ok": True, "id": result["user_id"],
+            **({"setup_code": result["setup_code"]} if "setup_code" in result else {})}
+
+
+@route("POST", "/api/admin/approvals/<id>/reject")
+def admin_reject(app, conn, req):
+    P.reject(conn, req.int("id"), admin_id=_admin(conn, req), reason=req.get("reason"))
+    return {"ok": True}
+
+
+@route("POST", "/api/admin/approvals/<id>/cancel")
+def admin_cancel_approval(app, conn, req):
+    P.cancel(conn, req.int("id"), admin_id=_admin(conn, req))
+    return {"ok": True}
 
 
 @route("GET", "/api/admin/users/<id>/statement")
 def admin_user_statement(app, conn, req):
     _admin(conn, req)
-    code, limit = f"CUS_{req.int('id')}", _limit(req)
+    user_id, limit = req.int("id"), _limit(req)
+    if _is_admin(conn, user_id):    # an admin holds no money: no account of their own
+        return {"balance": _money(0), "entries": []}
+    code = f"CUS_{user_id}"
     with L._read(conn):     # the balance and the entries from the same moment
         return {"balance": _money(L.account_balance(conn, code)),
                 "entries": L.account_statement(conn, code, limit)}

@@ -8,7 +8,7 @@ The wallet runs the same way on any computer with Docker:
 
 - **the app**, which checks the books every hour and makes a backup every hour;
 - **Caddy** in front of it, which gives the HTTPS address workers open
-  (the workers' screens and the API; the admin screens are still to come);
+  (the workers' screens, the office's screens and the API);
 - **Cloudflare Tunnel**, only when the wallet runs on a computer at home or in
   the office.
 
@@ -36,11 +36,11 @@ workers while you decide.
 The workers' screens are at the wallet's address: a worker opens
 `https://<your address>/` on their phone, logs in with their phone number and
 password, and sees their balance and activity, sends money to a colleague,
-orders currency and changes their password. They are in English for now;
-Arabic and French come later. The admin screens are still to come: until then
-admins use the API (an admin who logs in on the workers' screens is told they
-are for workers' accounts). You can already set up the hosting and the
-backups.
+orders currency and changes their password. The office's screens are at
+`https://<your address>/admin`: admins add workers, take deposits, pay out
+cash and salaries, handle currency orders, prices and suppliers, and see the
+books' checks and the backups. Both are in English, Arabic and French, each
+person seeing their account's language.
 
 Check whether Libyan rules (for example the Central Bank of Libya's) apply to
 holding workers' money and personal data.
@@ -94,7 +94,8 @@ holding workers' money and personal data.
 
 8. **Check it.** Open `https://wallet.example.com/api/ping`; it should show
    `{"ok": true}`. `https://wallet.example.com/` should show the workers'
-   login screen.
+   login screen, and `https://wallet.example.com/admin` the office's, where
+   you log in as the admin you just made.
 9. **Set up the off-site backups and both alerts** (section 4). Don't skip
    this.
 
@@ -454,12 +455,20 @@ upgrade, restore the backup taken just before it.
   difference, or a backup that failed or could not be copied.
 - The emails from both healthchecks.io checks: the app's, and the off-site
   copy's.
-- In the admin health answer (`GET /api/admin/health`, for now an API call
-  with an admin's login), under `maintenance`: `last_check.ok`,
-  `last_backup.ok` (also false when a copy or the removal of old backups
-  failed), and `backup_overdue` (true when no sound backup has been made for
-  more than two hours and ten minutes). The same is in the `PROBLEM` lines of
-  the log.
+- The office's Overview screen (`/admin`): the books' checks, and under
+  "Backups and hourly checks" the last check, the last good backup, and a
+  warning when no sound backup has been made for more than two hours and ten
+  minutes. The same is in the `PROBLEM` lines of the log.
+- Requests waiting for your approval. Changes to an admin's account (a new
+  admin, a reset of an admin's password, unblocking or reopening an admin)
+  need a second admin. With only two admins, when one asks about the other,
+  only you can approve, on the server:
+
+      docker compose exec app manage approvals
+      docker compose exec app manage approve 3
+
+  `approve` shows the request and asks before doing it; a setup code it makes
+  is shown there once: give it to that admin in person.
 - Free disk space, with `df -h` on Linux.
 - After an update, open the wallet's address: it should show the workers'
   login screen. If it shows `{"error": "not found", "type": "http"}`
