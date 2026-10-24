@@ -117,6 +117,47 @@
     document.documentElement.setAttribute("lang", lang);
     document.documentElement.setAttribute("dir", t("meta.dir") === "rtl" ? "rtl" : "ltr");
     applyStrings();
+    each(byId("lang-switch").querySelectorAll("button[data-lang]"), function (button) {
+      button.setAttribute("aria-pressed",
+                          button.getAttribute("data-lang") === lang ? "true" : "false");
+    });
+  }
+
+  // Before a login: the language picked on the login screen's switch, else
+  // the first of the phone's languages that strings.js has, else English.
+  // Once logged in, the worker's account says (chooseLanguage(me.language)).
+  var picked = null;
+
+  function preferredLanguage() {
+    if (picked) {
+      return picked;
+    }
+    var wanted = navigator.languages || [navigator.language || ""];
+    for (var i = 0; i < wanted.length; i += 1) {
+      var code = String(wanted[i]).slice(0, 2).toLowerCase();
+      if (has(STRINGS, code)) {
+        return code;
+      }
+    }
+    return "en";
+  }
+
+  // The switch shows each language in itself ("العربية", "Français"), from
+  // its own block's meta.name; a language strings.js lacks is left out.
+  function wireLanguageSwitch() {
+    var name = k("meta.name");
+    each(byId("lang-switch").querySelectorAll("button[data-lang]"), function (button) {
+      var code = button.getAttribute("data-lang");
+      if (!has(STRINGS, code) || !has(STRINGS[code], name)) {
+        button.hidden = true;
+        return;
+      }
+      button.textContent = STRINGS[code][name];
+      button.addEventListener("click", function () {
+        picked = code;
+        chooseLanguage(code);
+      });
+    });
   }
 
   // ---------- page helpers ----------
@@ -262,15 +303,18 @@
   }
 
   var formatters = {};
+  // Dates and times in Libya's Arabic: its month names with the digits 0-9,
+  // as amounts are written.
+  var LOCALES = {ar: "ar-LY"};
 
   function formatter(withDate) {
     var name = lang + (withDate ? ":date" : ":time");
     if (!has(formatters, name)) {
       var options = withDate ? {dateStyle: "medium", timeStyle: "short"} : {timeStyle: "short"};
       try {
-        formatters[name] = new Intl.DateTimeFormat(lang, options);
+        formatters[name] = new Intl.DateTimeFormat(LOCALES[lang] || lang, options);
       } catch (e) {     // an older browser without dateStyle
-        formatters[name] = new Intl.DateTimeFormat(lang);
+        formatters[name] = new Intl.DateTimeFormat(LOCALES[lang] || lang);
       }
     }
     return formatters[name];
@@ -720,6 +764,7 @@
       sections[screen].hidden = screen !== name;
     });
     document.body.setAttribute("data-screen", name);
+    byId("lang-switch").hidden = name !== "login" && name !== "setup";
     navLinks.forEach(function (link) {
       if (link.getAttribute("data-nav") === name) {
         link.setAttribute("aria-current", "page");
@@ -797,7 +842,7 @@
       dropPending(PENDING_ORDER);
     }
     byId("nav").hidden = true;
-    chooseLanguage("en");
+    chooseLanguage(preferredLanguage());
     resetLogin();
     resetHome();
     resetSend();
@@ -2164,7 +2209,8 @@
       account: byId("screen-account")
     };
     navLinks = Array.prototype.slice.call(byId("nav").querySelectorAll("a[data-nav]"));
-    chooseLanguage("en");
+    wireLanguageSwitch();
+    chooseLanguage(preferredLanguage());
     wireLogin();
     wireHome();
     wireSend();

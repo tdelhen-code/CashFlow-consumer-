@@ -2,7 +2,7 @@
 
 A web app where workers hold LYD balances, send LYD to each other, and order
 foreign currency paid from their balance: the backend, the workers' screens
-and the office's screens (both in English for now; see "Screens" below).
+and the office's screens (see "Screens" below).
 
 - `app/ledger.py`: balances, payroll, deposits, transfers, cash withdrawal with
   commission, bank and till accounts, reversals, admin log, hourly checks and
@@ -232,12 +232,14 @@ the page `/admin` with `/static/admin.js` and `/static/admin.css` (and the
 same style sheet and icon); see "Office screens" below. A worker opens the wallet's
 address on their phone and logs in. The page then uses the Workers and
 Everyone routes below, and moves between its screens with the part of the
-address after `#` (`/#/send`). They are in English for now. Every text they
-show is in `app/static/strings.js`, one block per language. To add Arabic or
-French, copy the `en` block as `ar` or `fr`, translate its texts (keeping the
-keys and the `{name}`-style placeholders) and set its `meta.dir` (`rtl` for
-Arabic). Each worker then sees the language of their account (`language`),
-and English for a text that is missing. The five files are read once when the
+address after `#` (`/#/send`). They are in English, Arabic (right to left)
+and French. Every text they show is in `app/static/strings.js`, one block
+per language (`en`, `ar`, `fr`), with the same keys and `{name}`-style
+placeholders; a text missing in a block is shown in English. Each worker sees
+the language of their account (`language`). Before logging in, the page
+takes the first of the phone's languages it has (else English), and the login
+and setup screens have a switch to pick another. Dates are written the local
+way, always with the digits 0-9, like the amounts. The five files are read once when the
 server starts, so a changed file needs a restart. One missing then answers 404
 and is named in the log (`warning: ... is missing: the screens won't load`)
 right after the server's first line, by `app.web` and by `app.serve`. They

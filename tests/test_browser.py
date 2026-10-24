@@ -1602,19 +1602,67 @@ class BrowserTests(unittest.TestCase):
         expect(page.locator("#nav")).to_be_hidden()
         self.assertEqual(page.context.request.get(self.base + "/api/me").status, 401)
 
-    def test_the_screens_are_in_english_whatever_the_language(self):
-        for language in ("fr", "ar"):
+    def test_each_worker_sees_their_language(self):
+        strings_ = strings()
+        for language, direction in (("ar", "rtl"), ("fr", "ltr"), ("en", "ltr")):
             with self.subTest(language):
-                worker = self.worker("Ali", language=language)
+                worker = self.worker("Ali", language=language, lyd=12)
                 page = self.new_page()
                 self.open(page)
                 self.log_in(page, worker.phone)
+                self.assertEqual(page.get_attribute("html", "lang"), language)
+                self.assertEqual(page.get_attribute("html", "dir"), direction)
+                table = strings_[language]
+                self.assert_text(page, "#home-name", table["home.hello"].replace("{name}", "Ali"))
+                self.assert_text(page, "#home-balance",
+                                 table["money.lyd"].replace("{amount}", "12.000"))
+                self.assert_text(page, "#nav a[data-nav='send'] span", table["nav.send"])
+                self.assertEqual(page.title(), table["app.title"])
+                # Dates with the digits 0-9, as amounts are written.
+                self.assertRegex(page.text_content("#statement-list"), r"\d")
+                self.assertNotRegex(page.text_content("#statement-list"), "[٠-٩۰-۹]")
+                expect(page.locator("#lang-switch")).to_be_hidden()
+                self.go(page, "account")
+                self.tap(page, "#logout")
+                self.on_screen(page, "login")
+                # Logged out, the page follows the phone's language again (English).
                 self.assertEqual(page.get_attribute("html", "lang"), "en")
-                self.assertEqual(page.get_attribute("html", "dir"), "ltr")
-                self.assert_text(page, "#home-name", text("home.hello", name="Ali"))
-                self.assert_text(page, "#home-balance", lyd("0.000"))
-                self.assert_text(page, "#statement-empty", text("home.empty"))
-                self.assertEqual(page.title(), text("app.title"))
+
+    def test_the_login_screen_can_be_switched_to_another_language(self):
+        page = self.page
+        self.open(page)
+        self.on_screen(page, "login")
+        switch = page.locator("#lang-switch")
+        expect(switch).to_be_visible()
+        self.assertEqual([switch.locator(f"#lang-{code}").text_content()
+                          for code in ("en", "ar", "fr")], ["English", "العربية", "Français"])
+        expect(page.locator("#lang-en")).to_have_attribute("aria-pressed", "true")
+        self.tap(page, "#lang-ar")
+        self.assertEqual(page.get_attribute("html", "dir"), "rtl")
+        self.assert_text(page, "#login-title", strings()["ar"]["login.title"])
+        expect(page.locator("#lang-ar")).to_have_attribute("aria-pressed", "true")
+        self.assert_fits(page)
+        self.tap(page, "#login-to-setup")
+        self.on_screen(page, "setup")
+        self.assert_text(page, "#setup-title", strings()["ar"]["setup.title"])
+        self.tap(page, "#lang-fr")
+        self.assert_text(page, "#setup-title", strings()["fr"]["setup.title"])
+        self.assertEqual(page.get_attribute("html", "dir"), "ltr")
+
+    def test_a_phone_in_arabic_opens_in_arabic(self):
+        context = self.browser.new_context(viewport={"width": 320, "height": 640},
+                                           is_mobile=True, has_touch=True, locale="ar-LY")
+        context.set_default_timeout(WAIT_MS)
+        self.addCleanup(context.close)
+        page = self.new_page(context)
+        self.open(page)
+        self.on_screen(page, "login")
+        self.assertEqual(page.get_attribute("html", "lang"), "ar")
+        self.assert_text(page, "#login-submit", strings()["ar"]["login.submit"])
+        # An English worker still gets English once logged in.
+        worker = self.worker("Ali")
+        self.log_in(page, worker.phone)
+        self.assertEqual(page.get_attribute("html", "lang"), "en")
 
     # ---------- another website, the page files kept, no polling ----------
 

@@ -158,6 +158,39 @@ a {
   font-size: 1.05rem;
 }
 
+/* The language switch, on the login and setup screens: each language
+   written in itself. It goes under the title when they don't fit side by
+   side. */
+.bar {
+  flex-wrap: wrap;
+}
+
+.lang-switch {
+  display: flex;
+  gap: 4px;
+  margin-inline-start: auto;
+}
+
+.lang-button {
+  min-block-size: 40px;
+  min-inline-size: 40px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--primary);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  overflow-wrap: normal;
+}
+
+.lang-button[aria-pressed="true"] {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  font-weight: 700;
+}
+
 .main {
   max-inline-size: 560px;
   margin-inline: auto;
