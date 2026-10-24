@@ -14,8 +14,8 @@ In production:    python3 -m app.serve (app/serve.py): this app on waitress in
                   address) and trusted_proxy_headers="x-forwarded-for".
 
 Rules every request follows:
-- The workers' screens are one page at / and four files under /static/
-  (STATIC_FILES), read from app/static once at start, so a changed file needs
+- The screens are two pages, the workers' at / and the office's at /admin,
+  and their files under /static/ (STATIC_FILES), read from app/static once at start, so a changed file needs
   a restart, and one missing then answers 404 and is named on stderr. The
   request's path is only looked up in that list, never joined to a folder.
   They answer GET and HEAD only (any other method is a 405), with a strict
@@ -89,8 +89,9 @@ COOKIE = "session"                  # only with secure_cookies=False (plain http
 SECURE_COOKIE = "__Host-session"    # can't be set from another subdomain or path
 MAX_ID = 2**63 - 1                  # the largest whole number the database stores
 
-# The workers' screens: each URL path and its file in STATIC_DIR. Only these
-# are served; nothing else in the folder is ever read.
+# The screens: each URL path and its file in STATIC_DIR. Only these are
+# served; nothing else in the folder is ever read. The workers' page is /,
+# the office's /admin (it shares the style sheet and the icon).
 STATIC_DIR = Path(__file__).with_name("static")
 STATIC_FILES = {
     "/": "index.html",
@@ -98,6 +99,9 @@ STATIC_FILES = {
     "/static/strings.js": "strings.js",
     "/static/style.css": "style.css",
     "/static/icon.svg": "icon.svg",
+    "/admin": "admin.html",
+    "/static/admin.js": "admin.js",
+    "/static/admin.css": "admin.css",
 }
 # Fixed here, not taken from the system's table, which can say text/plain for
 # .js (on Windows).
@@ -573,6 +577,13 @@ def _admin(conn, req):
     return api.admin_id(conn, req.token)
 
 
+@route("GET", "/api/admin/me")
+def admin_me(app, conn, req):
+    user = conn.execute("SELECT id, name, phone, language FROM users WHERE id = ?",
+                        (_admin(conn, req),)).fetchone()
+    return dict(user)
+
+
 @route("GET", "/api/admin/users")
 def admin_users(app, conn, req):
     _admin(conn, req)
@@ -720,6 +731,16 @@ def admin_reconcile(app, conn, req):
 
 # ---------- admin: currencies, suppliers, orders ----------
 
+@route("GET", "/api/admin/currencies")
+def admin_currencies(app, conn, req):
+    """Every currency, switched on or off, with its price now (null: none set)."""
+    _admin(conn, req)
+    with L._read(conn):
+        rows = conn.execute("SELECT code, active FROM currencies ORDER BY code").fetchall()
+        return {"currencies": [dict(code=r["code"], active=bool(r["active"]),
+                                    price=O.current_price(conn, r["code"])) for r in rows]}
+
+
 @route("POST", "/api/admin/currencies")
 def admin_add_currency(app, conn, req):
     return {"code": O.add_currency(conn, req.get("code"), admin_id=_admin(conn, req))}
@@ -743,9 +764,15 @@ def admin_set_price(app, conn, req):
 @route("GET", "/api/admin/suppliers")
 def admin_suppliers(app, conn, req):
     _admin(conn, req)
-    rows = conn.execute("SELECT id, name, country, active FROM suppliers ORDER BY id")
-    return {"suppliers": [dict(r, balance=_money(O.supplier_balance(conn, r["id"])))
-                          for r in rows]}
+    with L._read(conn):
+        rows = conn.execute("SELECT id, name, country, active FROM suppliers ORDER BY id")
+        codes = [r["code"] for r in conn.execute("SELECT code FROM currencies ORDER BY code")]
+
+        def prices(supplier):       # {currency: its rate now}, for those it has one for
+            now = {c: O.current_supplier_price(conn, supplier, c) for c in codes}
+            return {c: price["rate"] for c, price in now.items() if price}
+        return {"suppliers": [dict(r, balance=_money(O.supplier_balance(conn, r["id"])),
+                                   prices=prices(r["id"])) for r in rows]}
 
 
 @route("POST", "/api/admin/suppliers")
@@ -1169,7 +1196,7 @@ def main(argv=None):
     app = App(args.db, secure_cookies=not args.insecure_cookies, trust_proxy=args.trust_proxy)
     with dev_server(app, args.host, args.port) as server:
         print(f"LYD wallet on http://{args.host}:{args.port}/ (the workers' screens; "
-              f"API under /api/; database {args.db})", flush=True)
+              f"the office's at /admin; API under /api/; database {args.db})", flush=True)
         app.warn_missing_pages()
         server.serve_forever()
 

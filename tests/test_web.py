@@ -1097,6 +1097,7 @@ class WebTests(unittest.TestCase):
         key = {"idempotency_key": "only-admins-1"}
         reason = {"reason": "checking"}
         requests = {
+            "GET /api/admin/me": "/api/admin/me",
             "GET /api/admin/users": "/api/admin/users",
             "POST /api/admin/users": ("/api/admin/users", {
                 "name": "Omar", "phone": "0944444444", "role": "admin", **reason}),
@@ -1122,6 +1123,7 @@ class WebTests(unittest.TestCase):
             "POST /api/admin/tills": ("/api/admin/tills", {"name": "back"}),
             "GET /api/admin/health": "/api/admin/health",
             "POST /api/admin/reconcile": ("/api/admin/reconcile", {"counts": {"BANK": "0"}}),
+            "GET /api/admin/currencies": "/api/admin/currencies",
             "POST /api/admin/currencies": ("/api/admin/currencies", {"code": "EUR"}),
             "POST /api/admin/currencies/active": ("/api/admin/currencies/active", {
                 "code": "USD", "active": False, **reason}),
@@ -1154,6 +1156,30 @@ class WebTests(unittest.TestCase):
             path, body = (request, None) if method == "GET" else request
             out[name] = (method, path, None if body is None else dict(body, admin_id=1))
         return out
+
+    def test_what_the_office_screens_read(self):
+        ali_id, ali = self.new_worker("Ali", "0921111111", "Garden-Lamp-4821")
+        self.assertEqual(self.admin.get("/api/admin/me"), (200, {
+            "id": 1, "name": "Admin", "phone": "+218910000000", "language": "en"}))
+        self.assertEqual(self.admin.get("/api/admin/currencies"), (200, {"currencies": []}))
+        self.setup_orders(ali_id)
+        self.admin.post("/api/admin/currencies", {"code": "EUR"})
+        self.admin.post("/api/admin/currencies/active",
+                        {"code": "EUR", "active": False, "reason": "no supplier yet"})
+        status, body = self.admin.get("/api/admin/currencies")
+        self.assertEqual(status, 200)
+        [eur, usd] = body["currencies"]
+        self.assertEqual(eur, {"code": "EUR", "active": False, "price": None})
+        self.assertEqual((usd["code"], usd["active"], usd["price"]["rate"]),
+                         ("USD", True, "7.85"))
+        self.assertEqual(set(usd["price"]), {"id", "rate", "set_at"})
+        # Each supplier with its rate now for each currency it has one for.
+        self.admin.post("/api/admin/suppliers/1/price", {"currency": "USD", "rate": "7.75"})
+        [cairo] = self.admin.get("/api/admin/suppliers")[1]["suppliers"]
+        self.assertEqual(cairo["prices"], {"USD": "7.75"})
+        # Workers get none of it.
+        for path in ("/api/admin/me", "/api/admin/currencies"):
+            self.assertEqual(ali.get(path)[0], 403, path)
 
     # --- admin routes: only an active admin gets through ---
     def test_every_admin_route_refuses_everyone_else(self):

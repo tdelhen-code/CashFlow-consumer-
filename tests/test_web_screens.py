@@ -44,6 +44,9 @@ TYPES = {
     "/static/strings.js": "text/javascript; charset=utf-8",
     "/static/style.css": "text/css; charset=utf-8",
     "/static/icon.svg": "image/svg+xml",
+    "/admin": "text/html; charset=utf-8",
+    "/static/admin.js": "text/javascript; charset=utf-8",
+    "/static/admin.css": "text/css; charset=utf-8",
 }
 FILES = {                           # stand-ins for app/static, by file name
     "index.html": b"<!doctype html>\n<title>Wallet</title>\n",
@@ -51,6 +54,9 @@ FILES = {                           # stand-ins for app/static, by file name
     "strings.js": b'window.STRINGS = {"en": {}};\n',
     "style.css": b"[hidden] { display: none !important; }\n",
     "icon.svg": b'<svg xmlns="http://www.w3.org/2000/svg"/>\n',
+    "admin.html": b"<!doctype html>\n<title>Office</title>\n",
+    "admin.js": b'"use strict"; // office\n',
+    "admin.css": b".table { inline-size: 100%; }\n",
 }
 
 
@@ -190,7 +196,9 @@ class PageTests(ScreensTestCase):
         # The contract with app/static and the browser tests.
         self.assertEqual(web.STATIC_FILES, {
             "/": "index.html", "/static/app.js": "app.js", "/static/strings.js": "strings.js",
-            "/static/style.css": "style.css", "/static/icon.svg": "icon.svg"})
+            "/static/style.css": "style.css", "/static/icon.svg": "icon.svg",
+            "/admin": "admin.html", "/static/admin.js": "admin.js",
+            "/static/admin.css": "admin.css"})
         self.assertEqual(web.STATIC_DIR, ROOT / "app" / "static")
         self.assertEqual(inspect.signature(web.App).parameters["static_dir"].default,
                          web.STATIC_DIR)
@@ -292,7 +300,8 @@ class PageTests(ScreensTestCase):
                      "/static/../web.py", "/static/%2e%2e/web.py", "/static/..%2fweb.py",
                      "/STATIC/app.js", "/static/APP.JS", "/static/app.js%00",
                      "/favicon.ico", "/robots.txt", "/static/secret.txt", "/static/sub/app.js",
-                     "/app/web.py", "/web.py", "/send", "//", "/static/app.js;x"):
+                     "/app/web.py", "/web.py", "/send", "//", "/static/app.js;x",
+                     "/admin/", "/admin.html", "/static/admin.html", "/ADMIN"):
             self.assert_not_found(raw(app, "GET", path), path)
             self.assertEqual(raw(app, "HEAD", path)[::2], (404, b""), path)
 
@@ -510,8 +519,8 @@ class RealServerTests(ScreensTestCase):
             web.main(["--db", db, "--port", "8123", "--insecure-cookies"])
         # Where the screens are, then (on stderr) the page file missing at start.
         self.assertEqual(log.getvalue().splitlines(), [
-            f"LYD wallet on http://127.0.0.1:8123/ (the workers' screens; API under /api/; "
-            f"database {db})",
+            f"LYD wallet on http://127.0.0.1:8123/ (the workers' screens; the office's at "
+            f"/admin; API under /api/; database {db})",
             f"warning: {self.static / 'app.js'} is missing: the screens won't load"])
         [(app, host, port)] = started
         self.assertEqual((host, port, app.secure_cookies, app.origin_schemes),

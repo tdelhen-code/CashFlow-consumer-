@@ -1,0 +1,329 @@
+/* The office's screens, on top of style.css (its colours, fields and
+   buttons). Made for a computer at the office first, and still usable on a
+   phone: tables scroll inside their own box, never the page. */
+
+.office .main {
+  max-inline-size: 1100px;
+  padding-block-end: 48px;
+}
+
+.bar-who {
+  margin-inline-start: auto;
+}
+
+/* The menu, under the bar: one row that wraps on a small screen. */
+.office-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px var(--gutter);
+  background: var(--surface);
+  border-block-end: 1px solid var(--line);
+}
+
+.office-nav a {
+  display: inline-block;
+  min-block-size: 40px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: normal;
+}
+
+.office-nav a:hover {
+  color: var(--primary);
+}
+
+.office-nav a[aria-current="page"] {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.narrow {
+  max-inline-size: 480px;
+}
+
+/* A worker's or supplier's facts side by side on a wide screen. */
+.office .facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 12px 24px;
+}
+
+.office .facts > div + div {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.office .ask .facts {
+  display: block;
+}
+
+.office .ask .facts > div + div {
+  margin-block-start: 12px;
+}
+
+.back {
+  margin-block-end: 8px;
+}
+
+/* ---------- forms side by side ---------- */
+
+.split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 16px;
+  margin-block: 16px;
+}
+
+.split > .card {
+  margin: 0;
+}
+
+.split h2,
+.ask h2,
+.card > h2:first-child {
+  margin-block-start: 0;
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0 12px;
+}
+
+.inline-form .field {
+  flex: 1 1 200px;
+  max-inline-size: 360px;
+}
+
+/* The button lines up with the inputs, under their labels. */
+.inline-form > .button {
+  flex: none;
+  margin-block-start: 30px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.row > .button {
+  inline-size: auto;
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block: 12px;
+}
+
+.button-row .button,
+td .button {
+  flex: none;
+}
+
+.field.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.field.check input {
+  inline-size: 22px;
+  min-block-size: 22px;
+  block-size: 22px;
+  flex: none;
+  margin: 2px 0 0;
+}
+
+.field.check label {
+  font-weight: 400;
+  margin: 0;
+}
+
+.search {
+  max-inline-size: 360px;
+  margin-block-start: 16px;
+}
+
+/* ---------- tables ---------- */
+
+/* Relative: a visually hidden header inside is placed (and clipped) in
+   this box, not the page, which would then scroll sideways. */
+.table-wrap {
+  position: relative;
+  overflow-x: auto;
+  margin-block-end: 12px;
+}
+
+.table {
+  inline-size: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-block-end: 12px;
+}
+
+.table-wrap .table {
+  margin: 0;
+}
+
+.table th,
+.table td {
+  padding: 10px 12px;
+  text-align: start;
+  vertical-align: top;
+  border-block-end: 1px solid var(--line);
+  overflow-wrap: normal;
+}
+
+.table th {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child td {
+  border-block-end: 0;
+}
+
+.table .end {
+  text-align: end;
+}
+
+.table td.num,
+.nowrap {
+  white-space: nowrap;
+}
+
+.detail {
+  display: block;
+}
+
+/* ---------- small things ---------- */
+
+.tag {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--bg);
+  color: var(--muted);
+}
+
+.tag-good,
+.tag-paid {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.tag-bad {
+  background: var(--error-bg);
+  color: var(--danger);
+}
+
+.tag-wait,
+.tag-placed {
+  background: var(--notice-bg);
+  color: var(--notice-line);
+}
+
+.tag-assigned {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.check-line {
+  font-weight: 600;
+}
+
+.check-line.good {
+  color: var(--success);
+}
+
+.check-line.bad {
+  color: var(--danger);
+}
+
+.plain-list {
+  margin-block: 0 16px;
+  padding-inline-start: 20px;
+}
+
+.error-list {
+  color: var(--danger);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 12px;
+  margin-block: 16px;
+}
+
+.tile {
+  margin: 0;
+}
+
+.tile-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.code-box {
+  border: 2px solid var(--success);
+}
+
+.block-reason {
+  display: block;
+}
+
+.order-cards > li {
+  padding: 14px 16px;
+}
+
+.order-cards p {
+  margin-block-end: 6px;
+}
+
+.order-cards .button-row {
+  margin-block-end: 0;
+}
+
+/* ---------- the question box ---------- */
+
+.ask-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px var(--gutter);
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.ask {
+  inline-size: 100%;
+  max-inline-size: 520px;
+  margin: 0;
+}
+
+.ask .facts {
+  margin-block-end: 16px;
+}

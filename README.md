@@ -1,8 +1,8 @@
 # LYD wallet (Al Naseem workers)
 
 A web app where workers hold LYD balances, send LYD to each other, and order
-foreign currency paid from their balance: the backend, and the workers'
-screens (in English for now; see "Screens" below).
+foreign currency paid from their balance: the backend, the workers' screens
+and the office's screens (both in English for now; see "Screens" below).
 
 - `app/ledger.py`: balances, payroll, deposits, transfers, cash withdrawal with
   commission, bank and till accounts, reversals, admin log, hourly checks and
@@ -185,7 +185,8 @@ or not at all), and one from a newer version of the app is refused
 ## Web API (`app/web.py`)
 
 Run it locally (plain http, so the cookie is allowed without HTTPS), then
-open `http://127.0.0.1:8000/` for the workers' screens:
+open `http://127.0.0.1:8000/` for the workers' screens, or
+`http://127.0.0.1:8000/admin` for the office's:
 
     python3 -m app.web --db wallet.db --port 8000 --insecure-cookies
 
@@ -226,7 +227,9 @@ take the session away with it.
 
 Screens: the workers' screens are one page at `/` and four files,
 `/static/app.js`, `/static/strings.js`, `/static/style.css` and
-`/static/icon.svg`, from the folder `app/static/`. A worker opens the wallet's
+`/static/icon.svg`, from the folder `app/static/`. The office's screens are
+the page `/admin` with `/static/admin.js` and `/static/admin.css` (and the
+same style sheet and icon); see "Office screens" below. A worker opens the wallet's
 address on their phone and logs in. The page then uses the Workers and
 Everyone routes below, and moves between its screens with the part of the
 address after `#` (`/#/send`). They are in English for now. Every text they
@@ -248,6 +251,40 @@ headers without the file, and any other method is a 405. Any other path
 outside the API (`/index.html`, `/favicon.ico`, `/send`, ...) is a JSON 404,
 like an unknown API path. API answers are never stored
 (`Cache-Control: no-store`).
+
+Office screens: an admin opens `/admin` on a computer (it works on a phone
+too) and logs in with their phone and password; an admin with a setup code
+chooses their password there too. A worker who logs in there is logged out
+again and told the screens are the office's. The page uses the Admin routes
+below:
+
+- Overview: the books' checks, what is owed to workers, what the bank and each
+  till should hold, margin and withdrawal fees earned, the backups' and
+  hourly checks' state (on the production server), adding a till, and the
+  margin report for a time;
+- Workers: everyone's accounts with their balance and state, found by name
+  or phone; a new account (a worker's or an admin's) shows its setup code
+  once. One account: deposit, cash withdrawal (with the fee and the cash to
+  hand over), a new setup code, block or unblock, lift a login lock, close
+  or reopen, the WhatsApp number, and its activity, where a transaction can
+  be reversed;
+- Orders: by state; give one to a supplier (at their rate or a one-off
+  one), mark paid with the supplier's payout reference (also by receipt
+  code), take one back from a supplier, or cancel and refund it;
+- Prices: the currencies, switched on or off, with the workers' price; a new
+  price (optionally voiding quotes already given), a new currency;
+- Suppliers: add one, their rates, paying them, using them or not, and their
+  account;
+- Log: the admin log, newest first, by kind.
+
+A deposit, withdrawal, reversal or supplier payment is shown once more to be
+confirmed, with a key made for that confirmation: pressing it again after a
+lost answer is not done twice. Every change that needs a reason asks for it.
+The wallet's own error text is shown as it is (the office reads English).
+`app/static/admin.js` keeps the workers' page's rules: no HTML put together
+from text, nothing from other sites, one `fetch`, nothing asked on a timer
+(`tests/test_admin_pages.py`); `tests/test_admin_browser.py` goes through the
+screens in Chromium.
 
 Requests from other websites: a request that can change something (any
 method but `GET` and `HEAD`) and that a browser sends from another website is
@@ -331,9 +368,9 @@ missing key (where required) or a blank one is a 400.
 |---|---|
 | Everyone | `GET /api/ping` (no login: `{"ok": true}` if the server and its database answer, for health checks); `POST /api/login` (`{phone, password}`), `/api/setup-password` (`{phone, code, password}`), `/api/logout` (this session), `/api/logout-everywhere` (every session of this user), `/api/change-password` (`{old_password, new_password}`; ends the other sessions) |
 | Workers (what the workers' screens use, with the Everyone routes) | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?, from_phone?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id, from_phone?}`). `from_phone` is the worker the screen shows: when the session is another worker's (who logged in since in another tab of the same browser), the request is refused as logged out (401) |
-| Admin: users | `GET /api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&kind=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; all filters optional; `kind` is `user`, `order`, `transaction`, `supplier` or `code`); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `en` (default), `ar` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
+| Admin: users | `GET /api/admin/me` (the admin logged in: `{id, name, phone, language}`), `/api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&kind=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; all filters optional; `kind` is `user`, `order`, `transaction`, `supplier` or `code`); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `en` (default), `ar` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
 | Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` (the checks' `problems`, what is owed and held, and `maintenance`: see below) |
-| Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/active` (`{active: true/false, reason}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?, rate?}`; an order without a supplier needs `supplier_id`, and `rate` is a one-off rate for it); `GET /api/admin/suppliers`, `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
+| Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/active` (`{active: true/false, reason}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?, rate?}`; an order without a supplier needs `supplier_id`, and `rate` is a one-off rate for it); `GET /api/admin/currencies` (every currency, `active` or not, with its `price` now: `{id, rate, set_at}` or null), `/suppliers` (each with its current `prices`, `{currency: rate}`), `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
 
 ## Running it for real
 
@@ -428,5 +465,7 @@ or order checks found problems.
   database answer, for the proxy's and the container's health checks.
 
 Not built yet: suppliers paid in foreign currency instead of LYD, approvals
-(such as a second admin approving a reset of an admin's account), the admin
-screens, and the workers' screens in Arabic and French.
+(such as a second admin approving a reset of an admin's account), screens
+for salaries in bulk (payroll), moving money between the bank and tills,
+counting the cash (reconcile) and capital (the API has them), and the
+workers' and office's screens in Arabic and French.

@@ -240,7 +240,12 @@ class RealPagesServedTests(unittest.TestCase):
         links = _Links()
         links.feed((STATIC / "index.html").read_text("utf-8"))
         self.assertEqual(sorted(links.found),
-                         sorted(p for p in web.STATIC_FILES if p.startswith("/static/")))
+                         sorted(p for p in web.STATIC_FILES if p.startswith("/static/") and
+                                not p.startswith("/static/admin")))
+        links = _Links()
+        links.feed((STATIC / "admin.html").read_text("utf-8"))
+        self.assertEqual(sorted(links.found), ["/static/admin.css", "/static/admin.js",
+                                               "/static/icon.svg", "/static/style.css"])
 
 
 class _Recorder:
@@ -1666,7 +1671,8 @@ class BrowserTests(unittest.TestCase):
         self.on_screen(page, "login")
         self.assertEqual(first.headers["content-security-policy"], web.PAGE_CSP)
         self.assertEqual(first.headers["cache-control"], "no-cache")
-        assets = [p for p in web.STATIC_FILES if p.endswith((".js", ".css"))]
+        assets = [p for p in web.STATIC_FILES if p.endswith((".js", ".css"))
+                  and not p.startswith("/static/admin")]       # the office's page's
         self.assertEqual([self.server_saw(p) for p in ["/"] + assets],
                          [[("GET", 200, False, None)]] * (1 + len(assets)))
         # Opened again, every file is asked for (a new version is seen at
