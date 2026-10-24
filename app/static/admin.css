@@ -327,3 +327,18 @@ td .button {
 .ask .facts {
   margin-block-end: 16px;
 }
+
+/* An amount typed in a table's row (salaries, cash counted). */
+.table .amount-input {
+  inline-size: 9em;
+  max-inline-size: 100%;
+  min-block-size: 40px;
+  margin-inline-start: auto;
+  padding: 6px 10px;
+  font-size: 1rem;
+  text-align: end;
+}
+
+.table td.difference {
+  font-weight: 600;
+}

@@ -30,6 +30,7 @@
 <nav id="nav" class="office-nav" aria-label="Office menu" hidden>
   <a data-nav="overview" href="#/overview">Overview</a>
   <a data-nav="workers" href="#/workers">Workers</a>
+  <a data-nav="money" href="#/money">Money</a>
   <a data-nav="orders" href="#/orders">Orders</a>
   <a data-nav="prices" href="#/prices">Prices</a>
   <a data-nav="suppliers" href="#/suppliers">Suppliers</a>
@@ -349,6 +350,129 @@
   </div>
   <p id="worker-empty" class="empty" hidden>No activity yet.</p>
   <button id="worker-more" type="button" class="button secondary" hidden>Show more</button>
+</section>
+
+<!-- ---------- money ---------- -->
+
+<section id="screen-money" data-screen="money" aria-labelledby="money-title" hidden>
+  <div class="heading-row">
+    <h1 id="money-title" tabindex="-1">Money</h1>
+    <button id="money-refresh" type="button" class="button small secondary">Refresh</button>
+  </div>
+  <p id="money-error" class="error" tabindex="-1" hidden></p>
+
+  <h2 id="payroll-title">Salaries</h2>
+  <p class="muted small">The company sent one payment for everyone: type each worker's
+    salary (leave the others empty). It's posted once per payment reference.</p>
+  <form id="payroll-form" method="post" action="/admin" novalidate>
+    <div class="inline-form">
+      <div class="field">
+        <label for="payroll-ref">Payment reference</label>
+        <input id="payroll-ref" name="batch_ref" type="text" autocomplete="off" maxlength="100"
+               aria-describedby="payroll-ref-hint">
+        <p id="payroll-ref-hint" class="hint">Like the bank transfer's number, or NOV-2026.</p>
+      </div>
+      <div class="field">
+        <label for="payroll-into">Received into</label>
+        <select id="payroll-into" name="into"></select>
+      </div>
+      <div class="field">
+        <label for="payroll-note">Note (optional)</label>
+        <input id="payroll-note" name="note" type="text" autocomplete="off" maxlength="200">
+      </div>
+    </div>
+    <div class="field search">
+      <label for="payroll-search">Find by name or phone</label>
+      <input id="payroll-search" name="search" type="search" autocomplete="off" maxlength="100">
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr>
+          <th scope="col">Worker</th><th scope="col">Phone</th>
+          <th scope="col" class="end">Salary (LYD)</th>
+        </tr></thead>
+        <tbody id="payroll-rows"></tbody>
+      </table>
+    </div>
+    <p id="payroll-empty" class="empty" hidden>No workers who can be paid.</p>
+    <p id="payroll-total" class="strong"></p>
+    <p id="payroll-error" class="error" tabindex="-1" hidden></p>
+    <button id="payroll-submit" type="submit" class="button primary narrow">Next</button>
+  </form>
+
+  <div class="split">
+    <form id="move-form" class="card" method="post" action="/admin" novalidate>
+      <h2>Move money</h2>
+      <p class="muted small">Cash taken from the bank to a till, a till's cash put in the
+        bank, or from one till to another.</p>
+      <div class="field">
+        <label for="move-from">From</label>
+        <select id="move-from" name="from"></select>
+      </div>
+      <div class="field">
+        <label for="move-to">To</label>
+        <select id="move-to" name="to"></select>
+      </div>
+      <div class="field">
+        <label for="move-amount">Amount (LYD)</label>
+        <input id="move-amount" name="amount" type="text" inputmode="decimal"
+               autocomplete="off" maxlength="20">
+      </div>
+      <div class="field">
+        <label for="move-note">Note (optional)</label>
+        <input id="move-note" name="note" type="text" autocomplete="off" maxlength="200">
+      </div>
+      <p id="move-error" class="error" tabindex="-1" hidden></p>
+      <button id="move-submit" type="submit" class="button primary">Next</button>
+    </form>
+
+    <form id="capital-form" class="card" method="post" action="/admin" novalidate>
+      <h2>Owner's money</h2>
+      <p class="muted small">The owner's own money put into the bank or a till (to pay
+        out from), or taken out.</p>
+      <div class="field">
+        <label for="capital-direction">What</label>
+        <select id="capital-direction" name="direction">
+          <option value="in">Put in</option>
+          <option value="out">Take out</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="capital-code">Bank or till</label>
+        <select id="capital-code" name="code"></select>
+      </div>
+      <div class="field">
+        <label for="capital-amount">Amount (LYD)</label>
+        <input id="capital-amount" name="amount" type="text" inputmode="decimal"
+               autocomplete="off" maxlength="20">
+      </div>
+      <div class="field">
+        <label for="capital-note">Note (optional)</label>
+        <input id="capital-note" name="note" type="text" autocomplete="off" maxlength="200">
+      </div>
+      <p id="capital-error" class="error" tabindex="-1" hidden></p>
+      <button id="capital-submit" type="submit" class="button primary">Next</button>
+    </form>
+  </div>
+
+  <h2 id="count-title">Count the cash</h2>
+  <p class="muted small">Type what is really there: the bank statement's balance, and the
+    cash counted in each till. Nothing is changed; it shows any difference with the books.</p>
+  <form id="count-form" method="post" action="/admin" novalidate>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr>
+          <th scope="col">Account</th><th scope="col" class="end">The books say</th>
+          <th scope="col" class="end">Really there (LYD)</th>
+          <th scope="col" class="end">Difference</th>
+        </tr></thead>
+        <tbody id="count-rows"></tbody>
+      </table>
+    </div>
+    <p id="count-result" class="check-line" role="status" hidden></p>
+    <p id="count-error" class="error" tabindex="-1" hidden></p>
+    <button id="count-submit" type="submit" class="button primary narrow">Compare</button>
+  </form>
 </section>
 
 <!-- ---------- orders ---------- -->

@@ -125,11 +125,15 @@
     return /^\d+(\.\d{1,3})?$/.test(text) && /[1-9]/.test(text);
   }
 
+  // A checked amount ("12.5") in dirhams (12500), from the text.
+  function dirhamsOf(text) {
+    var parts = text.split(".");
+    return Number(parts[0]) * 1000 + Number(((parts[1] || "") + "000").slice(0, 3));
+  }
+
   // "12.5" as "12.500 LYD", from the text (nothing rounded).
   function typedLyd(text) {
-    var parts = text.split(".");
-    var fraction = (parts[1] || "") + "000";
-    return lyd(Number(parts[0]) * 1000 + Number(fraction.slice(0, 3)));
+    return lyd(dirhamsOf(text));
   }
 
   function parseTime(text) {
@@ -286,7 +290,7 @@
   };
 
   var SCREENS = ["loading", "offline", "login", "setup", "overview", "workers", "worker",
-                 "orders", "prices", "suppliers", "supplier", "log", "account"];
+                 "money", "orders", "prices", "suppliers", "supplier", "log", "account"];
   var NAV_OF = {worker: "workers", supplier: "suppliers"};
 
   function show(name) {
@@ -1063,10 +1067,7 @@
       return null;
     }
     var key = newKey();
-    var feeDirhams = fee === "" || !/[1-9]/.test(fee) ? 0 :
-      Number(fee.split(".")[0]) * 1000 + Number(((fee.split(".")[1] || "") + "000").slice(0, 3));
-    var gross = Number(amount.split(".")[0]) * 1000 +
-      Number(((amount.split(".")[1] || "") + "000").slice(0, 3));
+    var feeDirhams = fee === "" ? 0 : dirhamsOf(fee), gross = dirhamsOf(amount);
     ask({
       title: "Cash withdrawal of " + typedLyd(amount) + "?",
       facts: [["For", user.name], ["Taken from their balance", lyd(gross), "num strong"],
@@ -1101,6 +1102,291 @@
         done("whatsapp-done", number ? "WhatsApp number saved." : "WhatsApp number removed.");
         return loadWorker();
       });
+  });
+
+  // ---------- money: salaries, moving money, the owner's money, counting ----------
+
+  var money = {seq: 0, expected: {}};
+
+  function openMoney() {
+    ["money-error", "payroll-error", "move-error", "capital-error", "count-error"]
+      .forEach(function (line) { silence(byId(line)); });
+    byId("count-result").hidden = true;
+    return loadMoney(true);
+  }
+
+  // Everything the screen shows. With fresh, the salaries typed are cleared too.
+  function loadMoney(fresh) {
+    var seq = (money.seq += 1);
+    return Promise.all([loadUsers(), get("/api/admin/health")]).then(function (got) {
+      if (seq !== money.seq) {
+        return;
+      }
+      var holdings = got[1].holdings || {};
+      state.holdings = Object.keys(holdings);
+      money.expected = {};
+      state.holdings.forEach(function (code) {
+        money.expected[code] = holdings[code].dirhams;
+      });
+      var all = holdingChoices(false);
+      fillSelect(byId("payroll-into"), all);
+      fillSelect(byId("move-from"), all);
+      fillSelect(byId("move-to"), all);
+      if (byId("move-to").value === byId("move-from").value && all.length > 1) {
+        byId("move-to").value = all[1][0];
+      }
+      fillSelect(byId("capital-code"), all);
+      if (fresh || !byId("payroll-rows").firstChild) {
+        drawPayroll();
+      }
+      drawCount();
+    }, function (problem) {
+      if (seq === money.seq) {
+        handle(problem, byId("money-error"));
+      }
+    });
+  }
+
+  // The workers who can be paid: active, not blocked.
+  function drawPayroll() {
+    var rows = byId("payroll-rows");
+    clear(rows);
+    var payable = state.users.filter(function (user) {
+      return user.role === "customer" && user.active && !user.blocked;
+    });
+    payable.forEach(function (user) {
+      var row = make("tr");
+      row.setAttribute("data-user", String(user.id));
+      row.setAttribute("data-find", (user.name + " " + user.phone).toLowerCase());
+      cell(row, user.name).dir = "auto";
+      cell(row, phoneText(user.phone), "num");
+      var input = make("input", "amount-input");
+      input.type = "text";
+      input.inputMode = "decimal";
+      input.autocomplete = "off";
+      input.maxLength = 20;
+      input.setAttribute("aria-label", "Salary for " + user.name);
+      cell(row, null, "end").appendChild(input);
+      rows.appendChild(row);
+    });
+    byId("payroll-empty").hidden = payable.length > 0;
+    byId("payroll-search").value = "";
+    payrollTotal();
+  }
+
+  function payrollLines() {
+    var lines = [], wrong = false;
+    Array.prototype.forEach.call(byId("payroll-rows").children, function (row) {
+      var typed = amountText(row.querySelector("input").value);
+      if (typed === "") {
+        return;
+      }
+      if (!isLyd(typed)) {
+        wrong = true;
+        return;
+      }
+      lines.push({user_id: Number(row.getAttribute("data-user")), amount: typed});
+    });
+    return wrong ? null : lines;
+  }
+
+  function payrollTotal() {
+    var lines = payrollLines(), total = byId("payroll-total");
+    if (lines === null) {
+      total.textContent = "A salary isn't an amount in LYD.";
+      return;
+    }
+    var sum = lines.reduce(function (all, line) {
+      return all + dirhamsOf(line.amount);
+    }, 0);
+    total.textContent = lines.length ? lines.length + " worker" +
+      (lines.length === 1 ? "" : "s") + ", " + lyd(sum) + " in all." : "";
+  }
+
+  byId("payroll-rows").addEventListener("input", payrollTotal);
+
+  byId("payroll-search").addEventListener("input", function () {
+    var search = byId("payroll-search").value.trim().toLowerCase();
+    Array.prototype.forEach.call(byId("payroll-rows").children, function (row) {
+      row.hidden = search !== "" && row.getAttribute("data-find").indexOf(search) < 0;
+    });
+  });
+
+  onSubmit("payroll-form", "payroll-error", function () {
+    var lines = payrollLines(), ref = byId("payroll-ref").value.trim();
+    var into = byId("payroll-into").value, note = byId("payroll-note").value.trim();
+    if (lines === null) {
+      showError(byId("payroll-error"), "Type each salary in LYD, like 1200 or 950.5.");
+      return null;
+    }
+    if (!lines.length) {
+      showError(byId("payroll-error"), "Type at least one worker's salary.");
+      return null;
+    }
+    if (!ref) {
+      showError(byId("payroll-error"), "Type the payment's reference.");
+      return null;
+    }
+    var total = lines.reduce(function (all, line) {
+      return all + dirhamsOf(line.amount);
+    }, 0);
+    var key = newKey();
+    ask({
+      title: "Pay " + lines.length + " salar" + (lines.length === 1 ? "y" : "ies") + "?",
+      facts: [["Reference", ref], ["Received into", into, "num"],
+              ["Workers", String(lines.length), "num"], ["In all", lyd(total), "num strong"]]
+        .concat(note ? [["Note", note]] : []),
+      text: "Each worker's balance goes up by their salary. A reference can be paid only once.",
+      yes: "Confirm salaries", key: key,
+      act: function () {
+        var body = {items: lines, batch_ref: ref, into: into, idempotency_key: key};
+        if (note) {
+          body.note = note;
+        }
+        return post("/api/admin/payroll", body).then(function () {
+          byId("payroll-ref").value = byId("payroll-note").value = "";
+          notify("Salaries " + ref + " paid: " + lyd(total) + " to " + lines.length +
+                 " worker" + (lines.length === 1 ? "." : "s."));
+          return loadMoney(true);
+        });
+      }
+    });
+    return null;
+  });
+
+  onSubmit("move-form", "move-error", function () {
+    var from = byId("move-from").value, to = byId("move-to").value;
+    var amount = amountText(byId("move-amount").value), note = byId("move-note").value.trim();
+    if (!from || from === to) {
+      showError(byId("move-error"), "Pick two different places.");
+      return null;
+    }
+    if (!isLyd(amount)) {
+      showError(byId("move-error"), "Type the amount in LYD, like 500.");
+      return null;
+    }
+    var key = newKey();
+    ask({
+      title: "Move " + typedLyd(amount) + "?",
+      facts: [["From", from, "num"], ["To", to, "num"], ["Amount", typedLyd(amount),
+              "num strong"]].concat(note ? [["Note", note]] : []),
+      yes: "Confirm move", key: key,
+      act: function () {
+        var body = {from: from, to: to, amount: amount, idempotency_key: key};
+        if (note) {
+          body.note = note;
+        }
+        return post("/api/admin/move", body).then(function () {
+          byId("move-amount").value = byId("move-note").value = "";
+          notify(typedLyd(amount) + " moved from " + from + " to " + to + ".");
+          return loadMoney(false);
+        });
+      }
+    });
+    return null;
+  });
+
+  onSubmit("capital-form", "capital-error", function () {
+    var code = byId("capital-code").value, putIn = byId("capital-direction").value === "in";
+    var amount = amountText(byId("capital-amount").value);
+    var note = byId("capital-note").value.trim();
+    if (!isLyd(amount)) {
+      showError(byId("capital-error"), "Type the amount in LYD, like 5000.");
+      return null;
+    }
+    var key = newKey();
+    ask({
+      title: (putIn ? "Put " + typedLyd(amount) + " into " : "Take " + typedLyd(amount) +
+              " out of ") + code + "?",
+      facts: [["What", putIn ? "The owner's money put in" : "Taken out by the owner"],
+              ["Bank or till", code, "num"], ["Amount", typedLyd(amount), "num strong"]]
+        .concat(note ? [["Note", note]] : []),
+      yes: putIn ? "Confirm: put in" : "Confirm: take out", key: key,
+      act: function () {
+        var body = {code: code, amount: amount, direction: putIn ? "in" : "out",
+                    idempotency_key: key};
+        if (note) {
+          body.note = note;
+        }
+        return post("/api/admin/capital", body).then(function () {
+          byId("capital-amount").value = byId("capital-note").value = "";
+          notify(typedLyd(amount) + (putIn ? " put into " : " taken out of ") + code + ".");
+          return loadMoney(false);
+        });
+      }
+    });
+    return null;
+  });
+
+  // One row per place, with what was typed kept when the books are read again.
+  function drawCount() {
+    var rows = byId("count-rows"), typed = {};
+    Array.prototype.forEach.call(rows.querySelectorAll("input"), function (input) {
+      typed[input.getAttribute("data-code")] = input.value;
+    });
+    clear(rows);
+    state.holdings.forEach(function (code) {
+      var row = make("tr");
+      row.setAttribute("data-code", code);
+      cell(row, code, "num");
+      cell(row, lyd(money.expected[code]), "num end");
+      var input = make("input", "amount-input");
+      input.type = "text";
+      input.inputMode = "decimal";
+      input.autocomplete = "off";
+      input.maxLength = 20;
+      input.value = typed[code] || "";
+      input.setAttribute("data-code", code);
+      input.setAttribute("aria-label", "Really in " + code);
+      cell(row, null, "end").appendChild(input);
+      cell(row, "", "num end difference");
+      rows.appendChild(row);
+    });
+  }
+
+  onSubmit("count-form", "count-error", function () {
+    var counts = {}, wrong = false, result = byId("count-result");
+    result.hidden = true;
+    Array.prototype.forEach.call(byId("count-rows").querySelectorAll("input"), function (input) {
+      var typed = amountText(input.value);
+      if (typed === "") {
+        return;
+      }
+      if (!/^\d+(\.\d{1,3})?$/.test(typed)) {
+        wrong = true;
+      }
+      counts[input.getAttribute("data-code")] = typed;
+    });
+    if (wrong || !Object.keys(counts).length) {
+      showError(byId("count-error"), wrong ? "Type each amount in LYD, like 1520.5." :
+                "Type what is really there for at least one place.");
+      return null;
+    }
+    return post("/api/admin/reconcile", {counts: counts}).then(function (answer) {
+      var bad = 0;
+      answer.rows.forEach(function (r) {
+        var row = byId("count-rows").querySelector('tr[data-code="' + r.account + '"]');
+        if (!row) {
+          return;
+        }
+        var cellOf = row.querySelector(".difference");
+        cellOf.textContent = r.ok ? "Matches" : signed(r.difference);
+        cellOf.className = "num end difference " + (r.ok ? "in" : "out");
+        row.children[1].textContent = lyd(r.expected);
+        if (!r.ok) {
+          bad += 1;
+        }
+      });
+      result.textContent = bad ? bad + " place" + (bad === 1 ? " doesn't" : "s don't") +
+        " match the books. Count again, then look for what wasn't recorded." :
+        "Everything counted matches the books.";
+      result.className = "check-line " + (bad ? "bad" : "good");
+      result.hidden = false;
+    });
+  });
+
+  onClick("money-refresh", "money-error", function () {
+    return loadMoney(false);
   });
 
   // ---------- orders ----------
@@ -1668,7 +1954,7 @@
   }
 
   var MONEY_DETAILS = {amount: true, gross: true, fee: true, margin: true,
-                       supplier_cost: true, cost: true};
+                       supplier_cost: true, cost: true, total: true};
   var DETAIL_NAME = {user_id: "worker", supplier_id: "supplier",
                      customer_blocked: "worker blocked", void_quotes: "old quotes voided",
                      payout_ref: "payout reference"};
@@ -1753,6 +2039,7 @@
     overview: openOverview,
     workers: openWorkers,
     worker: openWorker,
+    money: openMoney,
     orders: openOrders,
     prices: openPrices,
     suppliers: openSuppliers,

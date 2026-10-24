@@ -268,6 +268,11 @@ below:
   hand over), a new setup code, block or unblock, lift a login lock, close
   or reopen, the WhatsApp number, and its activity, where a transaction can
   be reversed;
+- Money: salaries (one company payment, each worker's salary typed in its
+  row, posted once per payment reference), moving money between the bank and
+  tills, the owner's money put in or taken out, and counting the cash: what
+  is really in the bank and each till against the books (nothing is
+  changed);
 - Orders: by state; give one to a supplier (at their rate or a one-off
   one), mark paid with the supplier's payout reference (also by receipt
   code), take one back from a supplier, or cancel and refund it;
@@ -277,7 +282,8 @@ below:
   account;
 - Log: the admin log, newest first, by kind.
 
-A deposit, withdrawal, reversal or supplier payment is shown once more to be
+A deposit, withdrawal, reversal, salary payment, move, owner's money or
+supplier payment is shown once more to be
 confirmed, with a key made for that confirmation: pressing it again after a
 lost answer is not done twice. Every change that needs a reason asks for it.
 The wallet's own error text is shown as it is (the office reads English).
@@ -354,7 +360,7 @@ limits; `AccountLocked` when a logged-in user's current-password tries are
 locked), 500 (nothing internal shown).
 
 `idempotency_key` (text, at most 200 characters) is required on `POST /api/send`
-and on the admin money routes `/api/admin/deposit`, `/payroll`, `/withdraw`,
+and on the admin money routes `/api/admin/deposit`, `/payroll`, `/withdraw`, `/capital`,
 `/move` and `/suppliers/<id>/pay`: the screen makes one per confirmation, so a
 double click or a retry posts once. The same key again with the same details
 answers with the first `txn_id` (on `/api/send` also when the colleague was
@@ -369,7 +375,7 @@ missing key (where required) or a blank one is a 400.
 | Everyone | `GET /api/ping` (no login: `{"ok": true}` if the server and its database answer, for health checks); `POST /api/login` (`{phone, password}`), `/api/setup-password` (`{phone, code, password}`), `/api/logout` (this session), `/api/logout-everywhere` (every session of this user), `/api/change-password` (`{old_password, new_password}`; ends the other sessions) |
 | Workers (what the workers' screens use, with the Everyone routes) | `GET /api/me`, `/api/statement`, `/api/recipient?phone=`, `/api/prices`, `/api/orders`; `POST /api/send` (`{to_phone, amount, idempotency_key, note?, from_phone?}`), `/api/quote` (`{currency, amount}`), `/api/orders` (`{quote_id, beneficiary_name, beneficiary_id, from_phone?}`). `from_phone` is the worker the screen shows: when the session is another worker's (who logged in since in another tab of the same browser), the request is refused as logged out (401) |
 | Admin: users | `GET /api/admin/me` (the admin logged in: `{id, name, phone, language}`), `/api/admin/users`, `/api/admin/users/<id>/statement`, `/api/admin/log?action=&kind=&target=` (the admin log, newest first: who issued and used setup codes, block, unassign and cancel reasons...; all filters optional; `kind` is `user`, `order`, `transaction`, `supplier` or `code`); `POST /api/admin/users` (`{name, phone, role?, language?, whatsapp?, reason?}`: `role` is `customer` (default) or `admin`, `language` `en` (default), `ar` or `fr`; returns the setup code; `reason` "new account" by default), `/api/admin/users/<id>/setup-code` (`{reason?}`, required for an admin's account), `.../whatsapp` (`{whatsapp}`, `null` or `""` removes it), `.../block`, `.../unblock`, `.../deactivate`, `.../reactivate`, `.../unlock` (each `{reason}`, required; unlock lifts a lock from wrong tries) |
-| Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` (the checks' `problems`, what is owed and held, and `maintenance`: see below) |
+| Admin: money | `POST /api/admin/deposit` (`{user_id, amount, into, idempotency_key, note?}`; `into` is `BANK` or a till such as `TILL_MAIN`), `/payroll` (`{items: [{user_id, amount}, ...], batch_ref, into?, idempotency_key, note?}`; `into` is `BANK` by default), `/withdraw` (`{user_id, amount, fee?, from_till, idempotency_key, note?}`; the worker gets `amount - fee` in cash), `/move` (`{from, to, amount, idempotency_key, note?}`, between the bank and tills), `/capital` (`{code, amount, direction, idempotency_key, note?}`: the owner's own money put into the bank or a till, `direction` `in`, or taken out, `out`), `/reverse` (`{txn_id, reason, idempotency_key?}`), `/tills` (`{name}`, becomes `TILL_<NAME>`), `/reconcile` (`{counts: {account: amount}}`, what is really in each); `GET /api/admin/health` (the checks' `problems`, what is owed and held, and `maintenance`: see below) |
 | Admin: orders | `POST /api/admin/currencies` (`{code}`), `/currencies/active` (`{code, active: true/false, reason}`), `/prices` (`{currency, rate, void_quotes?}`, `void_quotes` true/false), `/suppliers` (`{name, country?}`), `/suppliers/<id>/active` (`{active: true/false, reason}`), `/suppliers/<id>/price` (`{currency, rate}`), `/suppliers/<id>/pay` (`{amount, from, reference, idempotency_key, note?}`; `from` is `BANK` or a till), `/orders/<id>/assign` (`{supplier_id, rate?}`, only a placed order), `/orders/<id>/unassign` (`{reason}`), `/orders/<id>/cancel` (`{reason}`, only an order without a supplier), `/orders/paid` (`{receipt_code, payout_ref, supplier_id?, rate?}`; an order without a supplier needs `supplier_id`, and `rate` is a one-off rate for it); `GET /api/admin/currencies` (every currency, `active` or not, with its `price` now: `{id, rate, set_at}` or null), `/suppliers` (each with its current `prices`, `{currency: rate}`), `/suppliers/<id>/statement`, `/orders?status=` (with `customer_blocked`), `/margin?since=2026-10-01&until=2026-11-01` (orders paid from `since` up to but not including `until`; dates, or times like `2026-10-01T00:00:00Z` or with an offset; no zone = UTC) |
 
 ## Running it for real
@@ -465,7 +471,5 @@ or order checks found problems.
   database answer, for the proxy's and the container's health checks.
 
 Not built yet: suppliers paid in foreign currency instead of LYD, approvals
-(such as a second admin approving a reset of an admin's account), screens
-for salaries in bulk (payroll), moving money between the bank and tills,
-counting the cash (reconcile) and capital (the API has them), and the
+(such as a second admin approving a reset of an admin's account), and the
 workers' and office's screens in Arabic and French.

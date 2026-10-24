@@ -1118,6 +1118,8 @@ class WebTests(unittest.TestCase):
                 "user_id": ali_id, "amount": "5", "from_till": "TILL_MAIN", **key}),
             "POST /api/admin/move": ("/api/admin/move", {
                 "from": "BANK", "to": "TILL_MAIN", "amount": "5", **key}),
+            "POST /api/admin/capital": ("/api/admin/capital", {
+                "code": "BANK", "amount": "5", "direction": "in", **key}),
             "POST /api/admin/reverse": ("/api/admin/reverse",
                                         {"txn_id": deposit, **reason}),
             "POST /api/admin/tills": ("/api/admin/tills", {"name": "back"}),
@@ -1180,6 +1182,26 @@ class WebTests(unittest.TestCase):
         # Workers get none of it.
         for path in ("/api/admin/me", "/api/admin/currencies"):
             self.assertEqual(ali.get(path)[0], 403, path)
+
+    def test_capital_in_and_out(self):
+        body = {"code": "TILL_MAIN", "amount": "500", "direction": "in",
+                "idempotency_key": "cap-1"}
+        self.assertEqual(self.admin.post("/api/admin/tills", {"name": "main"})[0], 200)
+        status, first = self.admin.post("/api/admin/capital", body)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.admin.post("/api/admin/capital", body), (200, first))  # once
+        holdings = self.admin.get("/api/admin/health")[1]["holdings"]
+        self.assertEqual(holdings["TILL_MAIN"]["lyd"], "500.000")
+        status, _ = self.admin.post("/api/admin/capital", dict(
+            body, amount="200", direction="out", idempotency_key="cap-2"))
+        self.assertEqual(status, 200)
+        holdings = self.admin.get("/api/admin/health")[1]["holdings"]
+        self.assertEqual(holdings["TILL_MAIN"]["lyd"], "300.000")
+        for wrong in ({"direction": "sideways"}, {"amount": "0"}, {"code": "NOPE"},
+                      {"idempotency_key": ""}):
+            status, _ = self.admin.post("/api/admin/capital",
+                                        {**body, "idempotency_key": "cap-x", **wrong})
+            self.assertIn(status, (400, 404), wrong)
 
     # --- admin routes: only an active admin gets through ---
     def test_every_admin_route_refuses_everyone_else(self):

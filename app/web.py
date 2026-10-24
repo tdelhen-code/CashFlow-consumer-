@@ -691,6 +691,16 @@ def admin_move(app, conn, req):
                                    idempotency_key=_idem_key(req))}
 
 
+@route("POST", "/api/admin/capital")
+def admin_capital(app, conn, req):
+    """The owner's own money put into the bank or a till ("in") or taken out
+    ("out")."""
+    return {"txn_id": L.capital(conn, req.get("code"), L.parse_lyd(req.amount("amount")),
+                                admin_id=_admin(conn, req), direction=req.get("direction"),
+                                note=req.get("note", required=False),
+                                idempotency_key=_idem_key(req))}
+
+
 @route("POST", "/api/admin/reverse")
 def admin_reverse(app, conn, req):
     return {"txn_id": L.reverse(conn, req.number("txn_id"), admin_id=_admin(conn, req),

@@ -391,6 +391,87 @@ class AdminBrowserTests(unittest.TestCase):
         self.assert_text("#supplier-balance", "1,000.000 LYD paid in advance")
         expect(page.locator("#supplier-rows")).to_contain_text("TRANSFER-77")
 
+    def salary_input(self, name):
+        return self.page.locator("#payroll-rows").get_by_label(f"Salary for {name}")
+
+    def test_salaries_for_several_workers_are_paid_once(self):
+        mona, _ = self.worker("Mona Payroll")
+        sami, _ = self.worker("Sami Payroll", lyd=10)
+        blocked, _ = self.worker("Blocked Payroll")
+        L.block_user(self.conn, blocked, admin_id=1, reason="left without notice")
+        self.log_in()
+        page = self.page
+        self.open("#/money", "money")
+        expect(page.locator("#payroll-rows")).not_to_contain_text("Blocked Payroll")
+        self.click("#payroll-submit")
+        self.assert_text("#payroll-error", "Type at least one worker's salary.")
+        self.salary_input("Mona Payroll").fill("1200")
+        self.salary_input("Sami Payroll").fill("950.5")
+        self.assert_text("#payroll-total", "2 workers, 2,150.500 LYD in all.")
+        self.click("#payroll-submit")
+        self.assert_text("#payroll-error", "Type the payment's reference.")
+        # The search hides other rows but keeps what was typed.
+        page.fill("#payroll-search", "mona")
+        expect(page.locator("#payroll-rows tr", has_text="Sami Payroll")).to_be_hidden()
+        page.fill("#payroll-search", "")
+        page.fill("#payroll-ref", "OCT-2026")
+        self.click("#payroll-submit")
+        self.assert_text("#ask-title", "Pay 2 salaries?")
+        expect(page.locator("#ask-facts")).to_contain_text("2,150.500 LYD")
+        self.answer()
+        self.assert_text("#notice", "Salaries OCT-2026 paid: 2,150.500 LYD to 2 workers.")
+        self.assertEqual(L.balance(self.conn, mona), 1_200_000)
+        self.assertEqual(L.balance(self.conn, sami), 10_000 + 950_500)
+        expect(self.salary_input("Mona Payroll")).to_have_value("")
+        # The same reference again is refused: nobody is paid twice.
+        self.salary_input("Mona Payroll").fill("1200")
+        page.fill("#payroll-ref", "oct-2026")
+        self.click("#payroll-submit")
+        self.answer()
+        expect(page.locator("#ask-error")).to_contain_text("already posted")
+        self.assertEqual(L.balance(self.conn, mona), 1_200_000)
+
+    def test_money_moved_put_in_and_counted(self):
+        L.add_till(self.conn, "SHOP2", admin_id=1)
+        self.log_in()
+        page = self.page
+        self.open("#/money", "money")
+        # The owner puts 1000 into the bank, then 300 goes to the shop's till.
+        page.select_option("#capital-direction", "in")
+        page.select_option("#capital-code", "BANK")
+        page.fill("#capital-amount", "1000")
+        self.click("#capital-submit")
+        self.assert_text("#ask-title", "Put 1,000.000 LYD into BANK?")
+        self.answer()
+        self.assert_text("#notice", "1,000.000 LYD put into BANK.")
+        bank = L.holding_amount(self.conn, "BANK")
+        page.select_option("#move-from", "BANK")
+        page.select_option("#move-to", "BANK")
+        page.fill("#move-amount", "300")
+        self.click("#move-submit")
+        self.assert_text("#move-error", "Pick two different places.")
+        page.select_option("#move-to", "TILL_SHOP2")
+        self.click("#move-submit")
+        self.answer()
+        self.assert_text("#notice", "300.000 LYD moved from BANK to TILL_SHOP2.")
+        self.assertEqual(L.holding_amount(self.conn, "TILL_SHOP2"), 300_000)
+        self.assertEqual(L.holding_amount(self.conn, "BANK"), bank - 300_000)
+        # Counting: the till matches, and 20 LYD less in the bank shows.
+        row = page.locator('#count-rows tr[data-code="TILL_SHOP2"]')
+        expect(row).to_contain_text("300.000 LYD")
+        page.locator("#count-rows").get_by_label("Really in TILL_SHOP2").fill("300")
+        counted = bank - 300_000 - 20_000
+        page.locator("#count-rows").get_by_label("Really in BANK").fill(
+            f"{counted // 1000}.{counted % 1000:03d}")
+        before = self.count("SELECT COUNT(*) FROM transactions")
+        self.click("#count-submit")
+        expect(row.locator(".difference")).to_have_text("Matches")
+        expect(page.locator('#count-rows tr[data-code="BANK"] .difference')).to_have_text(
+            "−20.000 LYD")
+        self.assert_text("#count-result", "1 place doesn't match the books. Count again, "
+                                          "then look for what wasn't recorded.")
+        self.assertEqual(self.count("SELECT COUNT(*) FROM transactions"), before)
+
     def test_an_ended_session_goes_back_to_the_login(self):
         self.log_in()
         self.open("#/workers", "workers")
@@ -420,7 +501,8 @@ class AdminBrowserTests(unittest.TestCase):
         page = self.new_page(PHONE)
         self.log_in(page)
         for hash_, screen in (("#/overview", "overview"), ("#/workers", "workers"),
-                              (f"#/worker/{uid}", "worker"), ("#/orders", "orders"),
+                              (f"#/worker/{uid}", "worker"), ("#/money", "money"),
+                              ("#/orders", "orders"),
                               ("#/prices", "prices"), ("#/suppliers", "suppliers"),
                               (f"#/supplier/{supplier}", "supplier"), ("#/log", "log"),
                               ("#/account", "account")):

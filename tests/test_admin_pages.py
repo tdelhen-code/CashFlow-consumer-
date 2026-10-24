@@ -7,9 +7,9 @@ import unittest
 
 from tests.test_pages import Page, balanced, function_body, js_calls, literal_arg, read
 
-SCREENS = ("loading", "offline", "login", "setup", "overview", "workers", "worker", "orders",
-           "prices", "suppliers", "supplier", "log", "account")
-NAV = ("overview", "workers", "orders", "prices", "suppliers", "log", "account")
+SCREENS = ("loading", "offline", "login", "setup", "overview", "workers", "worker", "money",
+           "orders", "prices", "suppliers", "supplier", "log", "account")
+NAV = ("overview", "workers", "money", "orders", "prices", "suppliers", "log", "account")
 
 
 class AdminPageTests(unittest.TestCase):
@@ -113,7 +113,8 @@ class AdminPageTests(unittest.TestCase):
         for match in re.finditer(r"var key = newKey\(\);\s*(?:var [^;]+;\s*)*ask\(", self.code):
             questions.append(balanced(self.code, match.end() - 1))
         for path in ('"/api/admin/deposit"', '"/api/admin/withdraw"', '"/api/admin/reverse"',
-                     '"/pay"'):
+                     '"/pay"', '"/api/admin/payroll"', '"/api/admin/move"',
+                     '"/api/admin/capital"'):
             with self.subTest(path):
                 self.assertEqual(self.code.count(path), 1)
                 [question] = [q for q in questions if path in q]
